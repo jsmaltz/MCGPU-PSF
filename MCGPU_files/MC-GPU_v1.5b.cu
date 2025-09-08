@@ -1,6 +1,3 @@
-
-
-
 //   ** CHANGE LIST **  See below \section sec_changes
 
 // !!DBTv1.5b_PSF!! 
@@ -375,7 +372,37 @@
  */ 
 ////////////////////////////////////////////////////////////////////////////////////////
 
+//jsm added:
 
+#include <cuda_runtime_api.h>
+#ifndef cudaThreadSynchronize
+#define cudaThreadSynchronize cudaDeviceSynchronize
+#endif
+#ifndef cudaThreadExit
+#define cudaThreadExit cudaDeviceReset
+#endif
+
+// Get device clock in GHz (CUDA 13 switched away from struct fields)
+static inline float mcgpu_clock_GHz(int gpu_id, const cudaDeviceProp* prop) {
+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 13000)
+    int clock_khz = 0;
+    cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, gpu_id);  // kHz
+    return clock_khz * 1.0e-6f;                                        // -> GHz
+#else
+    return prop->clockRate * 1.0e-6f;                                   // legacy
+#endif
+}
+
+// Get kernel timeout flag (0/1)
+static inline int mcgpu_kernel_timeout(int gpu_id, const cudaDeviceProp* prop) {
+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 13000)
+    int t = 0;
+    cudaDeviceGetAttribute(&t, cudaDevAttrKernelExecTimeout, gpu_id);
+    return t;
+#else
+    return prop->kernelExecTimeoutEnabled;
+#endif
+}
 
 // *** Include header file with the structures and functions declarations
 #include <MC-GPU_v1.5b.h>
@@ -449,6 +476,7 @@ int main(int argc, char **argv)
 #ifdef USING_CUDA
   // The "MAIN_THREAD" macro prints the messages just once when using MPI threads (it has no effect if MPI is not used):  MAIN_THREAD == "if(0==myID)"
   MAIN_THREAD printf  ("\n             *** CUDA SIMULATION IN THE GPU ***\n");
+  MAIN_THREAD printf  ("\n             *** JSM version for CUDA13 ***\n");  
 #else
   MAIN_THREAD printf  ("\n             *** SIMULATION IN THE CPU ***\n");
 #endif
@@ -2128,7 +2156,7 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
   {
     // -- YES: using the tally
     psf_data->state = true;
-	new_line_ptr = fgets_trimmed(new_line, 250, file_ptr); sscanf(new_line, "%hd", &psf_data->psf_voi);   // # NUMBER OF  VOXELS TO TALLY PSF
+	new_line_ptr = fgets_trimmed(new_line, 250, file_ptr); sscanf(new_line, "%hhd", &psf_data->psf_voi);   // # NUMBER OF  VOXELS TO TALLY PSF
 	if (psf_data->psf_voi>MAXPSFVOI)
 	{
 		MAIN_THREAD printf("\n\n   !!read_input ERROR!! Number of PSF VOIS higher than the maximum declared in the compiler .\n");
@@ -3058,6 +3086,24 @@ void init_CUDA_device( int* gpu_id, int myID, int numprocs,
     exit(-1);
   }  
   
+  // JSM ---- CUDA 13 compatible device attributes ----
+  #include <cuda_runtime_api.h>  // safe to include again
+  
+  int clock_khz = 0;                 // device clock in kHz
+
+  // Get the active device ordinal explicitly (don't rely on a local name like deviceID)
+  int __mcgpu_dev_ordinal = 0;
+  cudaError_t __mcgpu_err_dev = cudaGetDevice(&__mcgpu_dev_ordinal);
+
+  // Query attributes that used to be struct fields
+  int __mcgpu_clock_khz = 0;                // device clock in kHz
+  int __mcgpu_kernel_timeout_enabled = 0;   // 0/1
+
+  cudaDeviceGetAttribute(&__mcgpu_clock_khz, cudaDevAttrClockRate,        __mcgpu_dev_ordinal);
+  cudaDeviceGetAttribute(&__mcgpu_kernel_timeout_enabled, cudaDevAttrKernelExecTimeout, __mcgpu_dev_ordinal);
+
+  // Convenience: GHz as float, used later
+  float __mcgpu_clock_GHz = __mcgpu_clock_khz * 1.0e-6f;
   
 #ifdef USING_MPI      
   if (numprocs>1)
@@ -3106,10 +3152,11 @@ void init_CUDA_device( int* gpu_id, int myID, int numprocs,
     }
     
   
-  
+    int __dev = 0;
+    cudaGetDevice(&__dev);
     //!!DeBuG!! MC-GPU_v1.4!! Skip GPUs connected to a monitor, if more GPUs available:
     checkCudaErrors(cudaGetDeviceProperties(&deviceProp, *gpu_id));    
-    if (0!=deviceProp.kernelExecTimeoutEnabled)                                 //!!DeBuG!! 
+    if  (mcgpu_kernel_timeout(__dev, &deviceProp) != 0)                         //!!DeBuG!! JSM
     {
       if((*gpu_id)<(deviceCount-1))                                             //!!DeBuG!! 
       {      
@@ -3188,19 +3235,24 @@ void init_CUDA_device( int* gpu_id, int myID, int numprocs,
 #endif
   // printf("                 Compute capability: %d.%d, Number multiprocessors: %d, Number cores: %d\n", deviceProp.major, deviceProp.minor, deviceProp.multiProcessorCount, GPU_cores);
   printf("                 Compute capability: %d.%d, Number multiprocessors: %d\n", deviceProp.major, deviceProp.minor, deviceProp.multiProcessorCount);
-  printf("                 Clock rate: %.2f GHz, Global memory: %.3f Mbyte, Constant memory: %.2f kbyte\n", deviceProp.clockRate*1.0e-6f, deviceProp.totalGlobalMem/(1024.f*1024.f), deviceProp.totalConstMem/1024.f);
+
+// jsm:
+  printf("                 Clock rate: %.2f GHz, Global memory: %.3f Mbyte, Constant memory: %.2f kbyte\n",
+       clock_khz * 1.0e-6f,
+       deviceProp.totalGlobalMem/(1024.f*1024.f),
+       deviceProp.totalConstMem/1024.f);
+
   printf("                 Shared memory per block: %.2f kbyte, Registers per block: %.2f kbyte\n", deviceProp.sharedMemPerBlock/1024.f, deviceProp.regsPerBlock/1024.f);
   int driverVersion = 0, runtimeVersion = 0;  
   cudaDriverGetVersion(&driverVersion);
   cudaRuntimeGetVersion(&runtimeVersion);
   printf("                 CUDA Driver Version: %d.%d, Runtime Version: %d.%d\n\n", driverVersion/1000, driverVersion%100, runtimeVersion/1000, runtimeVersion%100);
 
-  if (0!=deviceProp.kernelExecTimeoutEnabled)
-  {
-    printf("\n\n\n   !!WARNING!! The selected GPU is connected to a display and therefore CUDA driver will limit the kernel run time to 5 seconds and the simulation will likely fail!!\n");
-    printf( "              You can fix this by executing the simulation in a different GPU (select number in the input file) or by turning off the window manager and using the text-only Linux shell.\n\n\n");
-    // exit(-1);
-  }    
+  int __dev = 0;
+  cudaGetDevice(&__dev);
+  
+  if (mcgpu_kernel_timeout(__dev, &deviceProp) != 0)
+      printf("                 NOTE: kernel execution timeout is ENABLED on this device.\n");
 
   fflush(stdout);
   
@@ -3369,7 +3421,7 @@ int guestimate_GPU_performance(int gpu_id)
   // DISCONTINUED CUDA FUNCTION! float num_cores       = (float) _ConvertSMVer2Cores(deviceProp.major, deviceProp.minor) * deviceProp.multiProcessorCount;
   float num_cores_aprox = 128 * deviceProp.multiProcessorCount;   // I can't get the exact number of cores anymore; assume 128 per multiprocessor
   float comp_capability = (float) deviceProp.major;
-  float frequency       = deviceProp.clockRate*1.0e-6f;
+  float frequency = mcgpu_clock_GHz(gpu_id, &deviceProp); // GHz JSM
   
   int guestimated_value = (int)(0.5f*num_cores_aprox*frequency*comp_capability + 64.0f);
   return min_value(guestimated_value, 1024);     // Limit the returned number of blocks to prevent too long speed tests   !!DBT!!
@@ -3440,6 +3492,8 @@ int report_image(char* file_name_output, struct detector_struct* detector_data, 
   fprintf(file_ptr, "# \n");  
 #ifdef USING_CUDA
   fprintf(file_ptr, "#  *** SIMULATION IN THE GPU USING CUDA ***\n");
+  fprintf(file_ptr, "#  *** JSM MODIFIED VERSION FOR CUDA13 ***\n");
+  
 #else
   fprintf(file_ptr, "#  *** SIMULATION IN THE CPU ***\n");
 #endif  
@@ -3526,7 +3580,7 @@ int report_image(char* file_name_output, struct detector_struct* detector_data, 
   char file_binary[250];
   strncpy (file_binary, file_name_output, 250);
   strcat(file_binary,".raw");                       // !!BINARY!! 
-  FILE* file_binary_ptr = fopen(file_binary, "w");  // !!BINARY!!
+  FILE* file_binary_ptr = fopen(file_binary, "wb");  // !!BINARY!!  // JSM, windows compat
   if (file_binary_ptr==NULL)
   {
     printf("\n\n   !!fopen ERROR report_image!! Binary file %s can not be opened for writing!!\n", file_binary);
@@ -3742,8 +3796,8 @@ int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel
   strcat(file_binary_mean,".raw");                     
   strncpy (file_binary_sigma, file_dose_output, 250);
   strcat(file_binary_sigma,"_PercentRelError2sigma.raw");    
-  FILE* file_binary_mean_ptr  = fopen(file_binary_mean, "w");  // !!BINARY!!
-  FILE* file_binary_sigma_ptr = fopen(file_binary_sigma, "w");       // !!BINARY!!
+  FILE* file_binary_mean_ptr  = fopen(file_binary_mean, "wb");  // !!BINARY!!  // JSM, windows compat
+  FILE* file_binary_sigma_ptr = fopen(file_binary_sigma, "wb");       // !!BINARY!!  // JSM, windows compat
   if (file_binary_mean_ptr==NULL)
   {
     printf("\n\n   !!fopen ERROR report_voxels_dose!! Binary file %s can not be opened!!\n", file_dose_output);

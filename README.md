@@ -2,6 +2,61 @@
 
 ---
 
+# MCGPU-PSF (Windows & CUDA 13 compatible)
+
+# Change by: Jonathan S Maltz
+
+This fork adapts **MC-GPU-PSF** for modern CUDA toolkits (12/13) and Windows/MSVC builds,
+fixes binary output on Windows.
+
+## What’s changed
+
+- **CUDA 13 compatibility**
+  - Replace `cudaThreadSynchronize`/`cudaThreadExit` with device-runtime aliases.
+  - Query device attributes via `cudaDeviceGetAttribute` (e.g., clock rate).
+  - `#if defined(CUDART_VERSION) && (CUDART_VERSION >= 13000)` guards around legacy fields.
+
+- **Windows build**
+  - Example `nvcc` command for VS2022 toolchain.
+  - Increase stack reserve (`/STACK:33554432`) to avoid early stack overflow.
+  - Link against zlib (vcpkg or static) cleanly.
+
+- **Binary output correctness**
+  - Open `.raw` outputs with `"wb"` to prevent CRLF corruption on Windows.
+
+- **MPI (optional)**
+  - `-DUSE_MPI` support with MS-MPI include/lib paths; guards to allow non-MPI builds.
+
+## Typical quick build (Windows / CUDA 13 / RTX 4080)
+
+```bat
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+nvcc -O3 -use_fast_math -DUSING_CUDA -arch=sm_89 ^
+  -DcudaThreadSynchronize=cudaDeviceSynchronize ^
+  -DcudaThreadExit=cudaDeviceReset ^
+  -Xlinker /STACK:33554432 ^
+  -I . -I "cuda-samples\Common" -I "%CUDA_PATH%\include" ^
+  -I "C:\vcpkg\installed\x64-windows\include" ^
+  -L "C:\vcpkg\installed\x64-windows\lib" "C:\vcpkg\installed\x64-windows\lib\zlib.lib" ^
+  -o mcgpu.exe .\MC-GPU_v1.5b.cu
+
+## MPI build (Code is leaky in having MPI calls in non-MPI branches, easier to just use it)
+
+set MSMPI_INC=C:\Program Files (x86)\Microsoft SDKs\MPI\Include
+set MSMPI_LIB64=C:\Program Files (x86)\Microsoft SDKs\MPI\Lib\x64
+
+nvcc ... -DUSE_MPI ^
+  -I "%MSMPI_INC%" -L "%MSMPI_LIB64%" "%MSMPI_LIB64%\msmpi.lib" ^
+  -o mcgpu.exe .\MC-GPU_v1.5b.cu
+
+License & attribution
+
+This repository is a fork of gfrmd-ifgw/MCGPU-PSF
+.
+Original authors and license apply; see LICENSE.
+
+---
+
 
 This repository contains the tools described in the technical note:
 **"Technical Note: MC-GPU breast dosimetry validations with other Monte Carlo codes and Phase Space File implementation"**
