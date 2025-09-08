@@ -4,8 +4,6 @@
 
 # MCGPU-PSF (Windows & CUDA 13 compatible)
 
-# Change by: Jonathan S Maltz
-
 This fork adapts **MC-GPU-PSF** for modern CUDA toolkits (12/13) and Windows/MSVC builds,
 fixes binary output on Windows.
 
