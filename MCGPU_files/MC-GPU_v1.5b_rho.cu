@@ -2535,7 +2535,7 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
 
   // JSM add in density array read, start
 
-  char density_vox_file[512] = {0};  // empty = disabled
+  char density_vox_path[512] = {0};  // empty = disabled
   // Parse a line like: density_vox_file = <path>
   // If your parser is ad-hoc, a simple sscanf+strstr works:
   new_line_ptr = fgets_trimmed(new_line, 400, file_ptr);   
@@ -2567,9 +2567,9 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
 
   // Build edges: try files, else synthesize uniform from your geometry
   // Replace these with your real sources:
-  const char* x_edges_file = NULL
-  const char* y_edges_file = NULL
-  const char* z_edges_file = NULL
+  const char* x_edges_file = NULL;
+  const char* y_edges_file = NULL;
+  const char* z_edges_file = NULL;
 
   VoxelGeomInfo G;
   // these origins are for fallback when there are no edges given
@@ -2583,11 +2583,13 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
   char vox_edge_path[512] = {0};  // empty = disabled
   new_line_ptr = fgets_trimmed(new_line, 400, file_ptr);   
   printf("Checking for voxel edges vectors\n");
-  if (strstr(new_line, "vox_edge_path") != NULL) {MARK
+  if (strstr(new_line, "vox_edge_path") != NULL) {
     sscanf(new_line, "vox_edge_path = %511s", vox_edge_path);
     printf("Voxel edge file specified as: %s\n", vox_edge_path);
   }
 
+  exit(1);
+    
   EdgeVectors E = build_edges(nx, ny, nz, vox_edge_path, x_edges_file, y_edges_file, z_edges_file, G);
 
   // Upload density + edges and bind constants
