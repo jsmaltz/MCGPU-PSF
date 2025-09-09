@@ -1555,6 +1555,249 @@ static int ends_with(const char* s, const char* suf) {
     return ns>=nf && 0==_stricmp(s+ns-nf, suf);
 }
 
+// start JSM non-uniform voxel mods
+#include <vector>
+#include <cstdio>
+#include <cstdlib>
+#include <stdexcept>
+#include <string>
+#include <cuda_runtime.h>
+#include <cctype>
+
+static inline void trim_leading(FILE* f){
+    int c;
+    while ((c = fgetc(f)) != EOF) {
+        if (c == '#') { // skip comment line
+            while ((c = fgetc(f)) != EOF && c != '\n') {}
+        } else if (!isspace(c)) {
+            ungetc(c, f);
+            return;
+        }
+    }
+}
+
+static bool read_int3(FILE* f, int& nx, int& ny, int& nz){
+    trim_leading(f);
+    return fscanf(f, "%d %d %d", &nx, &ny, &nz) == 3;
+}
+
+static bool read_axis_line(FILE* f, char axis, std::vector<float>& out, int expected){
+    trim_leading(f);
+    int c = fgetc(f);
+    if (c != axis) return false;
+    c = fgetc(f);
+    if (c != ':') return false;
+
+    out.clear(); out.reserve(expected);
+    // read floats until we have expected, or hit EOL/EOF
+    for (;;) {
+        float v;
+        int n = fscanf(f, " %f", &v);
+        if (n == 1) {
+            out.push_back(v);
+            if ((int)out.size() == expected) break;
+            continue;
+        }
+        // ran out before expected -> fail
+        return false;
+    }
+    // consume rest of line
+    while ((c = fgetc(f)) != EOF && c != '\n') {}
+    return (int)out.size() == expected;
+}
+
+static void load_edges_txt(const char* path,
+                           int& nx, int& ny, int& nz,
+                           std::vector<float>& x,
+                           std::vector<float>& y,
+                           std::vector<float>& z)
+{
+    FILE* f = nullptr;
+#if defined(_WIN32)
+    fopen_s(&f, path, "rt");
+#else
+    f = fopen(path, "rt");
+#endif
+    if (!f) throw std::runtime_error(std::string("Cannot open edges file: ")+path);
+
+    if (!read_int3(f, nx, ny, nz))
+        throw std::runtime_error("edges.txt: failed to read nx ny nz");
+
+    if (!read_axis_line(f, 'x', x, nx+1))
+        throw std::runtime_error("edges.txt: failed to read x axis or wrong count");
+    if (!read_axis_line(f, 'y', y, ny+1))
+        throw std::runtime_error("edges.txt: failed to read y axis or wrong count");
+    if (!read_axis_line(f, 'z', z, nz+1))
+        throw std::runtime_error("edges.txt: failed to read z axis or wrong count");
+
+    fclose(f);
+
+    auto mono = [](const std::vector<float>& v){
+        for (size_t i=1;i<v.size();++i) if (!(v[i] > v[i-1])) return false;
+        return true;
+    };
+    if (!mono(x) || !mono(y) || !mono(z))
+        throw std::runtime_error("edges.txt: edges must be strictly increasing");
+}
+
+static inline void CUDA_OK(cudaError_t e, const char* msg){
+    if (e != cudaSuccess) { fprintf(stderr, "CUDA error: %s (%s)\n", msg, cudaGetErrorString(e)); std::abort(); }
+}
+
+static bool read_edge_file(const char* path, std::vector<float>& out, int expected_len){
+    if (!path || !*path) return false;
+    FILE* f = nullptr;
+#if defined(_WIN32)
+    fopen_s(&f, path, "rt");
+#else
+    f = fopen(path, "rt");
+#endif
+    if (!f) return false;
+    out.clear(); out.reserve(expected_len);
+    float v;
+    while (fscanf(f, "%f", &v) == 1) out.push_back(v);
+    fclose(f);
+    if ((int)out.size() != expected_len){
+        fprintf(stderr, "Edge file '%s' has %d values; expected %d.\n",
+                path, (int)out.size(), expected_len);
+        return false;
+    }
+    return true;
+}
+
+static void synthesize_uniform_edges(std::vector<float>& e, int n, float o0, float pitch){
+    e.resize(n+1);
+    for (int i = 0; i <= n; ++i) e[i] = o0 + i * pitch;
+}
+
+struct EdgeVectors {
+    std::vector<float> x, y, z;
+};
+
+// Replace these accessors with your actual source of uniform spacing/origin.
+// Fallbacks shown here:
+struct VoxelGeomInfo {
+    float origin_x, origin_y, origin_z;  // lower min corner in world coords
+    float pitch_x,  pitch_y,  pitch_z;   // voxel widths (uniform) if no files
+};
+
+
+static EdgeVectors build_edges_text(const char* edges_txt_path,
+                                    int& nx, int& ny, int& nz)
+{
+    EdgeVectors E;
+    load_edges_txt(edges_txt_path, nx, ny, nz, E.x, E.y, E.z);
+
+    auto mono = [](const std::vector<float>& v){
+        for (size_t i=1;i<v.size();++i) if (!(v[i] > v[i-1])) return false;
+        return true;
+    };
+    if (!mono(E.x) || !mono(E.y) || !mono(E.z)) {
+        fprintf(stderr, "edges.txt: edges must be strictly increasing\n");
+        std::exit(1);
+    }
+    return E;
+}
+
+
+static EdgeVectors build_edges(
+    int& nx, int& ny, int& nz,                    // note: nx/ny/nz may be updated if edges_txt is used
+    const char* edges_txt_path,                   // NEW: optional single text file (may be nullptr/"")
+    const char* x_edges_file, const char* y_edges_file, const char* z_edges_file,
+    const VoxelGeomInfo& fallback)
+{
+    EdgeVectors E;
+
+    // If a single text file is provided, use it and ignore per-axis files + fallback
+    if (edges_txt_path && *edges_txt_path) {
+        load_edges_txt(edges_txt_path, nx, ny, nz, E.x, E.y, E.z);
+
+        auto mono = [](const std::vector<float>& v){
+            for (size_t i=1;i<v.size();++i) if (!(v[i] > v[i-1])) return false;
+            return true;
+        };
+        if (!mono(E.x) || !mono(E.y) || !mono(E.z)) {
+            fprintf(stderr, "edges.txt: edges must be strictly increasing\n");
+            std::exit(1);
+        }
+        return E;
+    }
+
+    // Otherwise: per-axis files with uniform fallback
+    auto must_read_or_fallback = [&](const char* path, std::vector<float>& e,
+                                     int n, float origin, float pitch){
+        if (path && *path) {
+            if (!read_edge_file(path, e, n+1)) {
+                fprintf(stderr, "Edge file '%s' invalid; aborting (explicit path supplied).\n", path);
+                std::exit(1);
+            }
+        } else {
+            e.resize(n+1);
+            for (int i=0; i<=n; ++i) e[i] = origin + i * pitch;  // starts at origin (often 0.0f)
+        }
+    };
+
+    must_read_or_fallback(x_edges_file, E.x, nx, fallback.origin_x, fallback.pitch_x);
+    must_read_or_fallback(y_edges_file, E.y, ny, fallback.origin_y, fallback.pitch_y);
+    must_read_or_fallback(z_edges_file, E.z, nz, fallback.origin_z, fallback.pitch_z);
+
+    auto mono = [](const std::vector<float>& v){
+        for (size_t i=1;i<v.size();++i) if (!(v[i] > v[i-1])) return false;
+        return true;
+    };
+    if (!mono(E.x) || !mono(E.y) || !mono(E.z)) {
+        fprintf(stderr, "Edge arrays must be strictly increasing.\n");
+        std::exit(1);
+    }
+    return E;
+}
+
+static void upload_grid_to_device(
+    int nx, int ny, int nz,
+    const EdgeVectors& E,
+    const float* h_rho, bool have_rho,
+    float*& d_rho_out,   // returned (optional)
+    float*& d_xe_out, float*& d_ye_out, float*& d_ze_out) // returned (optional)
+{
+    // Dims + flags
+    CUDA_OK(cudaMemcpyToSymbol(c_nx, &nx, sizeof(int)), "copy c_nx");
+    CUDA_OK(cudaMemcpyToSymbol(c_ny, &ny, sizeof(int)), "copy c_ny");
+    CUDA_OK(cudaMemcpyToSymbol(c_nz, &nz, sizeof(int)), "copy c_nz");
+    int have_rho_i = have_rho ? 1 : 0;
+    CUDA_OK(cudaMemcpyToSymbol(c_have_rho, &have_rho_i, sizeof(int)), "copy c_have_rho");
+
+    // Density
+    float* d_rho = nullptr;
+    if (have_rho && h_rho){
+        const size_t nvox = (size_t)nx * ny * nz;
+        CUDA_OK(cudaMalloc((void**)&d_rho, nvox*sizeof(float)), "malloc d_rho");
+        CUDA_OK(cudaMemcpy(d_rho, h_rho, nvox*sizeof(float), cudaMemcpyHostToDevice), "copy d_rho");
+        CUDA_OK(cudaMemcpyToSymbol(c_d_rho, &d_rho, sizeof(d_rho)), "set c_d_rho");
+    } else {
+        float* nullp = nullptr;
+        CUDA_OK(cudaMemcpyToSymbol(c_d_rho, &nullp, sizeof(nullp)), "clear c_d_rho");
+    }
+    if (d_rho_out) d_rho_out = d_rho;
+
+    // Edge arrays: allocate on device, copy, then set pointer constants
+    float *d_xe=nullptr, *d_ye=nullptr, *d_ze=nullptr;
+    CUDA_OK(cudaMalloc((void**)&d_xe, (nx+1)*sizeof(float)), "malloc d_xe");
+    CUDA_OK(cudaMalloc((void**)&d_ye, (ny+1)*sizeof(float)), "malloc d_ye");
+    CUDA_OK(cudaMalloc((void**)&d_ze, (nz+1)*sizeof(float)), "malloc d_ze");
+
+    CUDA_OK(cudaMemcpy(d_xe, E.x.data(), (nx+1)*sizeof(float), cudaMemcpyHostToDevice), "copy x_edges");
+    CUDA_OK(cudaMemcpy(d_ye, E.y.data(), (ny+1)*sizeof(float), cudaMemcpyHostToDevice), "copy y_edges");
+    CUDA_OK(cudaMemcpy(d_ze, E.z.data(), (nz+1)*sizeof(float), cudaMemcpyHostToDevice), "copy z_edges");
+
+    CUDA_OK(cudaMemcpyToSymbol(c_x_edges, &d_xe, sizeof(d_xe)), "set c_x_edges");
+    CUDA_OK(cudaMemcpyToSymbol(c_y_edges, &d_ye, sizeof(d_ye)), "set c_y_edges");
+    CUDA_OK(cudaMemcpyToSymbol(c_z_edges, &d_ze, sizeof(d_ze)), "set c_z_edges");
+
+    if (d_xe_out) d_xe_out = d_xe;
+    if (d_ye_out) d_ye_out = d_ye;
+    if (d_ze_out) d_ze_out = d_ze;
+}
+
 // start JSM density mods
 int load_density_cube(const char* path,
                       int nx, int ny, int nz,
@@ -2296,46 +2539,61 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
   // Parse a line like: density_vox_file = <path>
   // If your parser is ad-hoc, a simple sscanf+strstr works:
   new_line_ptr = fgets_trimmed(new_line, 400, file_ptr);   
-  printf("Checking for density voxel file specification\n");
-  if (strstr(new_line, "density_vox_file") != NULL) {
-    sscanf(new_line, "density_vox_file = %511s", density_vox_file);
-    printf("Density voxel file specified as: %s\n", density_vox_file);
+  printf("Checking for density voxel path specification\n");
+  if (strstr(new_line, "density_vox_path") != NULL) {
+    sscanf(new_line, "density_vox_path = %511s", density_vox_path);
+    printf("Density voxel file specified as: %s\n", density_vox_path);
   }
 
   float* h_rho = NULL;
   float* d_rho = NULL;
   bool   have_rho = false;
 
-  if (density_vox_file[0]) {
-    int nx = voxel_data->num_voxels.x;
-    int ny = voxel_data->num_voxels.y;
-    int nz = voxel_data->num_voxels.z; 
-    if (0==load_density_cube(density_vox_file, nx, ny, nz, &h_rho)) {
-        cudaMalloc((void**)&d_rho, (size_t)nx*ny*nz*sizeof(float));
-        cudaMemcpy(d_rho, h_rho, (size_t)nx*ny*nz*sizeof(float), cudaMemcpyHostToDevice);
-        have_rho = true;
-        printf("==> Loaded density cube: %dx%dx%d (%.2f MB)\n", nx, ny, nz,
-               (nx*ny*1.0*nz*sizeof(float))/1024.0/1024.0);
-	std::vector<float> x_edges(nx+1);
-	std::vector<float> y_edges(nx+1);
-	std::vector<float> z_edges(nx+1);
+  int nx = voxel_data->num_voxels.x;
+  int ny = voxel_data->num_voxels.y;
+  int nz = voxel_data->num_voxels.z;
 
-	cudaMemcpyToSymbol(c_d_rho,   &d_rho,         sizeof(d_rho));
-	cudaMemcpyToSymbol(c_have_rho,&have_rho, sizeof(have_rho));
-	cudaMemcpyToSymbol(c_nx, &nx, sizeof(int));
-	cudaMemcpyToSymbol(c_ny, &ny, sizeof(int));
-	cudaMemcpyToSymbol(c_nz, &nz, sizeof(int));
-	cudaMemcpyToSymbol(c_x_edges, x_edges.data(), (nx+1)*sizeof(float));
-	cudaMemcpyToSymbol(c_y_edges, y_edges.data(), (ny+1)*sizeof(float));
-	cudaMemcpyToSymbol(c_z_edges, z_edges.data(), (nz+1)*sizeof(float));
 
-    } else {
-        fprintf(stderr,"!! density cube provided but failed to load; proceeding without per-voxel densities\n");
-	fflush(stderr);
-	exit(1);
-    }
-    
+  if (density_vox_path[0]) {
+      if (0 == load_density_cube(density_vox_path, nx, ny, nz, &h_rho)) {
+	  have_rho = true;
+	  printf("==> Loaded density cube: %dx%dx%d (%.2f MB)\n", nx, ny, nz,
+		 (nx*ny*1.0*nz*sizeof(float))/1024.0/1024.0);
+      } else {
+	  fprintf(stderr,"!! density cube provided but failed to load\n");
+	  std::exit(1);
+      }
   }
+
+  // Build edges: try files, else synthesize uniform from your geometry
+  // Replace these with your real sources:
+  const char* x_edges_file = NULL
+  const char* y_edges_file = NULL
+  const char* z_edges_file = NULL
+
+  VoxelGeomInfo G;
+  // these origins are for fallback when there are no edges given
+  G.origin_x = 0.0f; //voxel_data->voxel_origin.x;  // or your min corner
+  G.origin_y = 0.0f; //voxel_data->voxel_origin.y;
+  G.origin_z = 0.0f; //voxel_data->voxel_origin.z;
+  G.pitch_x  = voxel_data->voxel_size.x;    // uniform fallback pitch
+  G.pitch_y  = voxel_data->voxel_size.y;
+  G.pitch_z  = voxel_data->voxel_size.z;
+
+  char vox_edge_path[512] = {0};  // empty = disabled
+  new_line_ptr = fgets_trimmed(new_line, 400, file_ptr);   
+  printf("Checking for voxel edges vectors\n");
+  if (strstr(new_line, "vox_edge_path") != NULL) {MARK
+    sscanf(new_line, "vox_edge_path = %511s", vox_edge_path);
+    printf("Voxel edge file specified as: %s\n", vox_edge_path);
+  }
+
+  EdgeVectors E = build_edges(nx, ny, nz, vox_edge_path, x_edges_file, y_edges_file, z_edges_file, G);
+
+  // Upload density + edges and bind constants
+  float *d_xe=nullptr, *d_ye=nullptr, *d_ze=nullptr;
+  upload_grid_to_device(nx, ny, nz, E, h_rho, have_rho, d_rho, d_xe, d_ye, d_ze);
+ 
   // JSM add in density array read, end
   
   /////////////////////////////////////////////////////////////////////////////

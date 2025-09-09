@@ -1,13 +1,18 @@
 #pragma once
+#include <cuda_runtime.h>
 
-// Assumes these are defined in some TU and visible here via 'extern __constant__'
-extern __constant__ int    c_nx, c_ny, c_nz;
-extern __constant__ int    c_have_rho;
-extern __constant__ float* c_d_rho;
+extern "C" {
+  extern __constant__ int    c_nx;
+  extern __constant__ int    c_ny;
+  extern __constant__ int    c_nz;
+  extern __constant__ int    c_have_rho;
 
-extern __constant__ float* c_x_edges;
-extern __constant__ float* c_y_edges;
-extern __constant__ float* c_z_edges;
+  extern __constant__ float* c_d_rho;
+
+  extern __constant__ float* c_x_edges;
+  extern __constant__ float* c_y_edges;
+  extern __constant__ float* c_z_edges;
+}
 
 #if __CUDA_ARCH__ >= 350
   #define LDG(p) __ldg(p)
@@ -15,15 +20,12 @@ extern __constant__ float* c_z_edges;
   #define LDG(p) (*(p))
 #endif
 
-// dims
 static __device__ __forceinline__ int nx_dev(){ return c_nx; }
 static __device__ __forceinline__ int ny_dev(){ return c_ny; }
 static __device__ __forceinline__ int nz_dev(){ return c_nz; }
-
-// edge accessors (DEFINITIONS provided here → no 821-D)
 static __device__ __forceinline__ float x_edge(int i){ return LDG(&c_x_edges[i]); }
-static __device__ __forceinline__ float y_edge(int j){ return LDG(&c_y_edges[j]); }
-static __device__ __forceinline__ float z_edge(int k){ return LDG(&c_z_edges[k]); }
+static __device__ __forceinline__ float y_edge(int i){ return LDG(&c_y_edges[i]); }
+static __device__ __forceinline__ float z_edge(int i){ return LDG(&c_z_edges[i]); }
 
 // safe INF
 static __device__ __forceinline__ float finf(){ return __int_as_float(0x7f800000); }

@@ -103,19 +103,6 @@ void init_image_array_GPU(unsigned long long int* image, int pixels_per_image)
 __device__ __forceinline__ const float* rho_dev() { return c_d_rho; }
 __device__ __forceinline__ int have_rho_dev()     { return c_have_rho; }
 
-// JSM non-uniform voxel boundaries start
-// Max supported dims for constant memory fast path; adjust to your needs
-#define MAX_NX 1024
-#define MAX_NY 1024
-#define MAX_NZ 1024
-
-__constant__ int    c_nx, c_ny, c_nz;
-__constant__ int    c_have_rho;
-__constant__ float* c_d_rho;
-__constant__ float* c_x_edges;
-__constant__ float* c_y_edges;
-__constant__ float* c_z_edges;
-
 // Fallback (if dims exceed MAX_*): set pointers and flags
 __device__ __constant__ bool c_edges_in_const = true;
 __device__ float *g_x_edges = nullptr, *g_y_edges = nullptr, *g_z_edges = nullptr;
@@ -2306,7 +2293,7 @@ inline float voxel_intercept(short3* voxel_coord, const float3* position, const 
   float A0;
   float3 A;
   float stept;
-  float3 coord;
+  float3 coord; 
   float3 coordt;
   bool inside;
   float tol;
