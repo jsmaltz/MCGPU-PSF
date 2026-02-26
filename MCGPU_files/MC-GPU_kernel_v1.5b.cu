@@ -41,6 +41,16 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 
+// jsm to try fix invalid symbol errors
+__device__ __forceinline__ void touch_grid_constants()
+{
+    // Volatile read prevents optimization away
+    volatile int a = c_nx;
+    volatile int b = c_ny;
+    volatile int c = c_nz;
+    (void)a; (void)b; (void)c;
+}
+
 
 ////////////////////////////////////////////////////////////////////////////////
 //!  Initialize the image array, ie, set all pixels to zero
@@ -58,6 +68,9 @@
 __global__
 void init_image_array_GPU(unsigned long long int* image, int pixels_per_image)
 {
+  // jsm try to stop c_nx invalid errors
+  touch_grid_constants();
+
   int my_pixel = threadIdx.x + blockIdx.x*blockDim.x;
   if (my_pixel < pixels_per_image)
   {

@@ -97,6 +97,7 @@ void init_image_array_GPU(unsigned long long int* image, int pixels_per_image)
 #endif
 
 #include "grid_helpers.cuh"
+#include "grid_params.cuh"
 
 // JSM density voxel matrix support
 // Density pointer & flag
@@ -113,16 +114,19 @@ __device__ __forceinline__ float y_edge(int i);
 __device__ __forceinline__ float z_edge(int i);
 
 // Tiny device binary-search to map coordinate -> cell index
-__device__ __forceinline__ int lower_bound_edges(float p, int n, float (*edge)(int)){
-  // find max i such that edge(i) <= p < edge(i+1); return -1 if p < edge(0)
-  int lo = 0, hi = n; // edges 0..n
-  if (p < edge(0) || p >= edge(n)) return -1;
-  while (lo+1 < hi){
-    int mid = (lo+hi)>>1;
-    float e = edge(mid);
-    if (p >= e) lo = mid; else hi = mid;
-  }
-  return lo;
+__device__ __forceinline__ int lower_bound_edges_gp(float x, int n, const float* edges)
+{
+    // returns i in [0, n-1] such that edges[i] <= x < edges[i+1]
+    int lo = 0, hi = n; // search over [0,n]
+    while (lo + 1 < hi) {
+        int mid = (lo + hi) >> 1;
+        if (x < edges[mid]) hi = mid;
+        else lo = mid;
+    }
+    // clamp to valid voxel index
+    if (lo < 0) lo = 0;
+    if (lo > n-1) lo = n-1;
+    return lo;
 }
 
 __device__ __forceinline__ float next_face_t_x(int ix, float x, float dx){
@@ -202,7 +206,8 @@ __global__ void track_particles(int histories_per_thread,
                                 struct detector_struct* detector_data_array,
                                 struct source_struct* source_data_array, 
                                 ulonglong2* materials_dose,
-                                struct psf_struct* psf_data) //psf
+                                struct psf_struct* psf_data, //psf
+				const GridParams* gp) //jsm
 #else
            void track_particles(int history_batch,             // This variable is not required in the GPU, it uses the thread ID           
                                 int histories_per_thread,
@@ -351,7 +356,7 @@ __global__ void track_particles(int histories_per_thread,
 		
 		 for(voit=0; voit<psf_voi_shared; voit++)
 		 {
-		  spsf = voxel_intercept_non_uniform(psfvoxindex_shared[voit], &position, &direction, &step); //step until intercepts
+   	          spsf = voxel_intercept_non_uniform(gp, psfvoxindex_shared[voit], &position, &direction, &step); //step until intercepts
 		  if (spsf>0)
 		  {
 		      if (psf_data->psf_total[voit]<MAXPSFHIST){ //prevents overflow of the index
@@ -379,7 +384,7 @@ __global__ void track_particles(int histories_per_thread,
  
         // -- Locate the new particle in the voxel geometry:      
         //absvox = locate_voxel(position, &voxel_coord);   // Get the voxel number at the current position and the voxel coordinates (used to check if inside the dose ROI in DOSE TALLY).
-	absvox = locate_voxel_non_uniform(position, &voxel_coord);   // Get the voxel number at the current position and the voxel coordinates (used to check if inside the dose ROI in DOSE TALLY). JSM
+	absvox = locate_voxel_non_uniform(gp, position, &voxel_coord);   // Get the voxel number at the current position and the voxel coordinates (used to check if inside the dose ROI in DOSE TALLY). JSM
         if (absvox==FLAG_OUTSIDE_VOXELS)
           break;    // -- Particle escaped the voxel region! ("index" is still >0 at this moment)
           
@@ -420,7 +425,7 @@ __global__ void track_particles(int histories_per_thread,
 
 	const float* d_rho_ptr = rho_dev();
 	int have = have_rho_dev();
-	int NX = nx_dev(), NY = ny_dev(), NZ = nz_dev();
+	int NX = gp->nx, NY = gp->ny, NZ = gp->nz;
  
 	float rho = fetch_density(d_rho_ptr, have, ix, iy, iz, NX, NY, NZ, material0);
 	mfp_density = mfp_Woodcock * rho;
@@ -1125,81 +1130,43 @@ inline double ranecu_double_CPU(int2* seed)
 #ifdef USING_CUDA
 __device__
 #endif
-inline unsigned int locate_voxel(float3 p, short3* voxel_coord)
+inline unsigned int locate_voxel_non_uniform(const GridParams* gp,
+                                             const float3 p_world,
+                                             short3* voxel_coord)
 {
+    const int nx = gp->nx;
+    const int ny = gp->ny;
+    const int nz = gp->nz;
 
-  p.x -= voxel_data_CONST.offset.x;    // Translate the coordinate system to a reference where the voxel's lower back corner is at the origin
-  p.y -= voxel_data_CONST.offset.y;
-  p.z -= voxel_data_CONST.offset.z;
-  
-    if ( (p.y < EPS) || (p.y > (voxel_data_CONST.size_bbox.y-EPS)) ||
-         (p.x < EPS) || (p.x > (voxel_data_CONST.size_bbox.x-EPS)) ||
-         (p.z < EPS) || (p.z > (voxel_data_CONST.size_bbox.z-EPS)) )
-  {
-    // -- Particle escaped the voxelized geometry:
-     return FLAG_OUTSIDE_VOXELS;      // OLD CODE:  return -1;       !!DBTv1.4!!
-  }
- 
-  // -- Particle inside the voxelized geometry, find current voxel:
-  //    The truncation from float to integer could give troubles for negative coordinates but this will never happen thanks to the IF at the begining of this function.
-  //    (no need to use the CUDA function to convert float to integer rounding down (towards minus infinite): __float2int_rd)
-  
-  register int voxel_coord_x, voxel_coord_y, voxel_coord_z;
-  voxel_coord_x = __float2int_rd(p.x * voxel_data_CONST.inv_voxel_size.x);  
-  voxel_coord_y = __float2int_rd(p.y * voxel_data_CONST.inv_voxel_size.y);
-  voxel_coord_z = __float2int_rd(p.z * voxel_data_CONST.inv_voxel_size.z);  
-  
-  voxel_coord->x = (short int) voxel_coord_x;  // Output the voxel coordinates as short int (2 bytes) instead of int (4 bytes) to save registers; avoid type castings in the calculation of the return value.
-  voxel_coord->y = (short int) voxel_coord_y;
-  voxel_coord->z = (short int) voxel_coord_z;
-  
-  return ((unsigned int)(voxel_coord_x + voxel_coord_y*(voxel_data_CONST.num_voxels.x)) + ((unsigned int)voxel_coord_z)*(voxel_data_CONST.num_voxels.x)*(voxel_data_CONST.num_voxels.y));
+    const float* __restrict__ xe = gp->x_edges;
+    const float* __restrict__ ye = gp->y_edges;
+    const float* __restrict__ ze = gp->z_edges;
+
+    // Half-open bounds: [min, max). Points exactly at max are treated as outside.
+    // This avoids ambiguity at the far boundary and prevents ix==nx.
+    if (p_world.x < xe[0] || p_world.x >= xe[nx] ||
+        p_world.y < ye[0] || p_world.y >= ye[ny] ||
+        p_world.z < ze[0] || p_world.z >= ze[nz])
+    {
+        return FLAG_OUTSIDE_VOXELS;
+    }
+
+    const int ix = lower_bound_edges_gp(p_world.x, nx, xe);
+    const int iy = lower_bound_edges_gp(p_world.y, ny, ye);
+    const int iz = lower_bound_edges_gp(p_world.z, nz, ze);
+
+    voxel_coord->x = (short)ix;
+    voxel_coord->y = (short)iy;
+    voxel_coord->z = (short)iz;
+
+    // X-fastest linearization
+    return (unsigned int)(ix + nx * (iy + (unsigned int)ny * iz));
 }
 
 __device__ __forceinline__ int nx_dev();
 __device__ __forceinline__ int ny_dev();
 __device__ __forceinline__ int nz_dev();
 
-#ifdef USING_CUDA
-__device__
-#endif
-inline unsigned int locate_voxel_non_uniform(const float3 p_world, short3* voxel_coord)
-{
-    // Assumption: x_edge/y_edge/z_edge are in the *same world coordinates* as p_world.
-    // If your edges were built relative to an offset, either:
-    //   (a) include that offset in the edge arrays, or
-    //   (b) subtract the same offset from p_world here before searching.
-
-    const float EPS_local = 1e-6f;  // small guard; you can tune if needed
-
-    const int nx = nx_dev();
-    const int ny = ny_dev();
-    const int nz = nz_dev();
-
-    // Quick outside check
-    if (p_world.x < x_edge(0) + EPS_local || p_world.x > x_edge(nx) - EPS_local ||
-        p_world.y < y_edge(0) + EPS_local || p_world.y > y_edge(ny) - EPS_local ||
-        p_world.z < z_edge(0) + EPS_local || p_world.z > z_edge(nz) - EPS_local)
-    {
-        return FLAG_OUTSIDE_VOXELS;
-    }
-
-    // Map world coordinates to voxel indices via edges
-    const int ix = lower_bound_edges(p_world.x, nx, x_edge);
-    const int iy = lower_bound_edges(p_world.y, ny, y_edge);
-    const int iz = lower_bound_edges(p_world.z, nz, z_edge);
-
-    if (ix < 0 || iy < 0 || iz < 0) {
-        return FLAG_OUTSIDE_VOXELS; // just in case of numerical boundary cases
-    }
-
-    voxel_coord->x = (short)ix;
-    voxel_coord->y = (short)iy;
-    voxel_coord->z = (short)iz;
-
-    // Linear index with X-fastest layout
-    return (unsigned int)(ix + nx * (iy + (unsigned int)ny * iz));
-}
 
 //////////////////////////////////////////////////////////////////////
 //!   Rotates a vector; the rotation is specified by giving
@@ -2442,22 +2409,23 @@ inline float voxel_intercept(short3* voxel_coord, const float3* position, const 
 // position: ray origin, direction: normalized or not (t scales accordingly)
 // s0: upper bound for step (e.g., sampled free path); faces beyond this are ignored.
 // Returns -1.0f if no valid intersection within [0, *s0].
-inline __device__ float voxel_intercept_non_uniform(const short3* voxel_coord,
-                                                   const float3* position,
-                                                   const float3* direction,
-                                                   const float*  s0)
+inline __device__ float voxel_intercept_non_uniform(const GridParams* gp,
+						    const short3* voxel_coord,
+						    const float3* position,
+						    const float3* direction,
+						    const float*  s0)
 {
     const int ix = voxel_coord->x;
     const int iy = voxel_coord->y;
     const int iz = voxel_coord->z;
 
     // Face coordinates of the CURRENT voxel
-    const float x_min = x_edge(ix);
-    const float x_max = x_edge(ix+1);
-    const float y_min = y_edge(iy);
-    const float y_max = y_edge(iy+1);
-    const float z_min = z_edge(iz);
-    const float z_max = z_edge(iz+1);
+    const float x_min = gp->x_edges[ix];
+    const float x_max = gp->x_edges[ix + 1];
+    const float y_min = gp->y_edges[iy];
+    const float y_max = gp->y_edges[iy + 1];
+    const float z_min = gp->z_edges[iz];
+    const float z_max = gp->z_edges[iz + 1];
 
     // Small tolerance to mitigate FP edge cases (hit exactly on a face)
     // Scale with local voxel extent if you like; this fixed epsilon usually works well.
@@ -2567,13 +2535,13 @@ inline bool checkvoxbond(const float3* coordt, const float3* voxpos)      //
 #ifdef USING_CUDA
 __device__
 #endif
-inline bool checkvoxbond_nonuniform(const float3* p,
+inline bool checkvoxbond_nonuniform(const GridParams* gp, const float3* p,
                                                int ix, int iy, int iz,
                                                float tol)
 {
-    const float x0 = x_edge(ix),   x1 = x_edge(ix+1);
-    const float y0 = y_edge(iy),   y1 = y_edge(iy+1);
-    const float z0 = z_edge(iz),   z1 = z_edge(iz+1);
+    const float x0 = gp->x_edges[ix],   x1 = gp->x_edges[ix+1];
+    const float y0 = gp->y_edges[iy],   y1 = gp->y_edges[iy+1];
+    const float z0 = gp->z_edges[iz],   z1 = gp->z_edges[iz+1];
 
     return (p->x >= x0 - tol && p->x <= x1 + tol) &&
            (p->y >= y0 - tol && p->y <= y1 + tol) &&

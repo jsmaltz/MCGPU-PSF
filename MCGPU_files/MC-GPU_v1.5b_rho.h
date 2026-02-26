@@ -39,7 +39,6 @@
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-
 #ifndef MCGPU_H_
 #define MCGPU_H_
 
@@ -134,6 +133,7 @@ __constant__ float density_LUT_CONST[MAX_MATERIALS];    // !!inputDensity!! Dens
 
   #include <vector_types.h>
 
+  #include "grid_params.cuh"
 #else
   // Include the definition of the vector structures (float3, int2...) that are useful in the GPU (multiple values can be read simultaneously from the slow main memory):
   struct int2  { int x, y; };         typedef struct int2 int2;
@@ -448,12 +448,12 @@ inline unsigned int locate_voxel(float3 position, short3* voxel_coord);
 #ifdef USING_CUDA
 __device__
 #endif
-inline unsigned int locate_voxel_non_uniform(const float3 p_world, short3* voxel_coord);
+inline unsigned int locate_voxel_non_uniform(const GridParams* gp, const float3 p_world, short3* voxel_coord);
 
 #ifdef USING_CUDA
 __device__
 #endif
-inline __device__ float voxel_intercept_non_uniform(const short3* voxel_coord,
+inline __device__ float voxel_intercept_non_uniform(const GridParams* gp, const short3* voxel_coord,
                                                    const float3* position,
                                                    const float3* direction,
                                                    const float*  s0);

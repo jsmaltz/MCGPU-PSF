@@ -484,7 +484,10 @@ int main(int argc, char **argv)
 
   MAIN_THREAD printf("\n    -- INITIALIZATION phase:\n");
   MAIN_THREAD fflush(stdout);   // Clear the screen output buffer for the MAIN thread
-  
+
+  //extern "C" void mcgpu_link_device_constants_anchor(void);
+  // Call this early (before cudaMemcpyToSymbol)
+  //mcgpu_link_device_constants_anchor();
   
 ///////////////////////////////////////////////////////////////////////////////////////////////////
   
@@ -1127,7 +1130,7 @@ int main(int argc, char **argv)
 
     
     // *** Execute the x-ray transport kernel in the GPU ***
-    track_particles<<<blocks,threads>>>(histories_per_thread, (short int)num_p, seed_input_device, image_device, voxels_Edep_device, voxel_mat_dens_device, bitree_device, mfp_Woodcock_table_device, mfp_table_a_device, mfp_table_b_device, rayleigh_table_device, compton_table_device, detector_data_device, source_data_device, materials_dose_device, psf_data_device);
+    track_particles<<<blocks,threads>>>(histories_per_thread, (short int)num_p, seed_input_device, image_device, voxels_Edep_device, voxel_mat_dens_device, bitree_device, mfp_Woodcock_table_device, mfp_table_a_device, mfp_table_b_device, rayleigh_table_device, compton_table_device, detector_data_device, source_data_device, materials_dose_device, psf_data_device, d_gp));
     
 
 
@@ -1336,6 +1339,7 @@ int main(int argc, char **argv)
       int pixels_per_image = detector_data[0].num_pixels.x * detector_data[0].num_pixels.y;
       #ifdef USING_CUDA
         MAIN_THREAD printf("       ==> CUDA: Launching kernel to reset the device image to 0: number of blocks = %d, threads per block = 128\n", (int)(ceil(pixels_per_image/128.0f)+0.01f) );
+	
         init_image_array_GPU<<<(int)(ceil(pixels_per_image/128.0f)+0.01f),128>>>(image_device, pixels_per_image);
         fflush(stdout);
         //NOW FOR PSF DEBUG		
@@ -1564,6 +1568,8 @@ static int ends_with(const char* s, const char* suf) {
 #include <cuda_runtime.h>
 #include <cctype>
 
+#include "grid_helpers.cuh"
+
 static inline void trim_leading(FILE* f){
     int c;
     while ((c = fgetc(f)) != EOF) {
@@ -1752,13 +1758,86 @@ static EdgeVectors build_edges(
     return E;
 }
 
+#include "grid_params.cuh"
+
+// NOTE: d_rho_out/d_xe_out/... should be initialized by caller if you want to preserve existing allocations.
+// This function does not free previous allocations (same behavior as your original).
 static void upload_grid_to_device(
+    int nx, int ny, int nz,
+    const EdgeVectors& E,
+    const float* h_rho, bool have_rho,
+    float*& d_rho_out,             // returned (optional)
+    float*& d_xe_out, float*& d_ye_out, float*& d_ze_out,   // returned (optional)
+    GridParams*& d_gp_out)         // returned (required for new path)
+{
+    // -------------------------
+    // 1) Density cube (optional)
+    // -------------------------
+    float* d_rho = nullptr;
+    if (have_rho && h_rho) {
+        const size_t nvox = (size_t)nx * (size_t)ny * (size_t)nz;
+        CUDA_OK(cudaMalloc((void**)&d_rho, nvox * sizeof(float)), "malloc d_rho");
+        CUDA_OK(cudaMemcpy(d_rho, h_rho, nvox * sizeof(float), cudaMemcpyHostToDevice), "copy d_rho");
+    }
+    if (d_rho_out) d_rho_out = d_rho;
+
+    // -------------------------
+    // 2) Edge arrays on device
+    // -------------------------
+    float *d_xe = nullptr, *d_ye = nullptr, *d_ze = nullptr;
+
+    // Sanity: sizes must match
+    if ((int)E.x.size() != nx + 1 || (int)E.y.size() != ny + 1 || (int)E.z.size() != nz + 1) {
+        fprintf(stderr,
+            "upload_grid_to_device: edge vector size mismatch: "
+            "E.x=%d (need %d), E.y=%d (need %d), E.z=%d (need %d)\n",
+            (int)E.x.size(), nx+1, (int)E.y.size(), ny+1, (int)E.z.size(), nz+1);
+        exit(1);
+    }
+
+    CUDA_OK(cudaMalloc((void**)&d_xe, (size_t)(nx + 1) * sizeof(float)), "malloc d_xe");
+    CUDA_OK(cudaMalloc((void**)&d_ye, (size_t)(ny + 1) * sizeof(float)), "malloc d_ye");
+    CUDA_OK(cudaMalloc((void**)&d_ze, (size_t)(nz + 1) * sizeof(float)), "malloc d_ze");
+
+    CUDA_OK(cudaMemcpy(d_xe, E.x.data(), (size_t)(nx + 1) * sizeof(float), cudaMemcpyHostToDevice), "copy x_edges");
+    CUDA_OK(cudaMemcpy(d_ye, E.y.data(), (size_t)(ny + 1) * sizeof(float), cudaMemcpyHostToDevice), "copy y_edges");
+    CUDA_OK(cudaMemcpy(d_ze, E.z.data(), (size_t)(nz + 1) * sizeof(float), cudaMemcpyHostToDevice), "copy z_edges");
+
+    if (d_xe_out) d_xe_out = d_xe;
+    if (d_ye_out) d_ye_out = d_ye;
+    if (d_ze_out) d_ze_out = d_ze;
+
+    // -----------------------------------------
+    // 3) Upload a GridParams struct to device
+    // -----------------------------------------
+    GridParams h_gp{};
+    h_gp.nx = nx;
+    h_gp.ny = ny;
+    h_gp.nz = nz;
+    h_gp.have_rho = (have_rho && d_rho) ? 1 : 0;
+    h_gp.d_rho = d_rho;
+    h_gp.x_edges = d_xe;
+    h_gp.y_edges = d_ye;
+    h_gp.z_edges = d_ze;
+
+    GridParams* d_gp = nullptr;
+    CUDA_OK(cudaMalloc((void**)&d_gp, sizeof(GridParams)), "malloc d_gp");
+    CUDA_OK(cudaMemcpy(d_gp, &h_gp, sizeof(GridParams), cudaMemcpyHostToDevice), "copy d_gp");
+
+    d_gp_out = d_gp;
+}
+static void upload_grid_to_device_old(
     int nx, int ny, int nz,
     const EdgeVectors& E,
     const float* h_rho, bool have_rho,
     float*& d_rho_out,   // returned (optional)
     float*& d_xe_out, float*& d_ye_out, float*& d_ze_out) // returned (optional)
 {
+
+    void* addr = nullptr;
+    cudaError_t e = cudaGetSymbolAddress(&addr, c_nx);
+    printf("cudaGetSymbolAddress(c_nx): %s addr=%p\n", cudaGetErrorString(e), addr);
+    
     // Dims + flags
     CUDA_OK(cudaMemcpyToSymbol(c_nx, &nx, sizeof(int)), "copy c_nx");
     CUDA_OK(cudaMemcpyToSymbol(c_ny, &ny, sizeof(int)), "copy c_ny");
@@ -2588,14 +2667,16 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
     printf("Voxel edge file specified as: %s\n", vox_edge_path);
   }
 
-  exit(1);
-    
   EdgeVectors E = build_edges(nx, ny, nz, vox_edge_path, x_edges_file, y_edges_file, z_edges_file, G);
 
   // Upload density + edges and bind constants
   float *d_xe=nullptr, *d_ye=nullptr, *d_ze=nullptr;
-  upload_grid_to_device(nx, ny, nz, E, h_rho, have_rho, d_rho, d_xe, d_ye, d_ze);
- 
+
+  printf("Uploading to device \n");
+  GridParams* d_gp = nullptr;
+  upload_grid_to_device(nx, ny, nz, E, h_rho, have_rho, d_rho, d_xe, d_ye, d_ze, d_gp);
+  printf("Uploaded to device \n");
+  
   // JSM add in density array read, end
   
   /////////////////////////////////////////////////////////////////////////////
@@ -2668,6 +2749,7 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
           if (dummy>0 && id>=0 && id<256)
           {
             voxelId[id]=i;    // Assign current material to item number id in voxel-to-material conversion table (valid id from 0 to 255; 1 byte).
+	    //printf("\n\n voxelId[%d] = %d", id, i);
             flag_voxelId++;   // Mark that at voxelId has been used.
 //             MAIN_THREAD printf("\tid=%d\n",id);
           }
@@ -3697,12 +3779,15 @@ void init_CUDA_device( int* gpu_id, int myID, int numprocs,
 
   int pixels_per_image = detector_data[0].num_pixels.x * detector_data[0].num_pixels.y;
   MAIN_THREAD printf("       ==> CUDA: Launching kernel to initialize the device image to 0: number of blocks = %d, threads per block = 128\n", (int)(ceil(pixels_per_image/128.0f)+0.01f) );
-
+  CUDA_OK(cudaDeviceSynchronize(), "pre-kernel sync:init_image_array");
+  CUDA_OK(cudaGetLastError(), "pre-kernel last error clear");
   init_image_array_GPU<<<(int)(ceil(pixels_per_image/128.0f)+0.01f),128>>>(*image_device, pixels_per_image);
-    fflush(stdout);
-    cudaDeviceSynchronize(); // FOR CUDA 10.0
-    //cudaThreadSynchronize();      // Force the runtime to wait until all device tasks have completed
-    getLastCudaError("\n\n !!Kernel execution failed initializing the image array!! ");  // Check if kernel execution generated any error:
+  CUDA_OK(cudaGetLastError(), "kernel launch: init_image_array");
+  CUDA_OK(cudaDeviceSynchronize(), "kernel sync: init_image_array");
+  fflush(stdout);
+  cudaDeviceSynchronize(); // FOR CUDA 10.0
+  //cudaThreadSynchronize();      // Force the runtime to wait until all device tasks have completed
+  getLastCudaError("\n\n !!Kernel execution failed initializing the image array!! ");  // Check if kernel execution generated any error:
 
 
   //   --Init the dose array to 0 using a GPU kernel, if the tally is not disabled:

@@ -1,18 +1,26 @@
 #pragma once
 #include <cuda_runtime.h>
 
+#pragma message("USING grid_helpers.cuh from: " __FILE__)
+
+#ifdef __cplusplus
 extern "C" {
-  extern __constant__ int    c_nx;
-  extern __constant__ int    c_ny;
-  extern __constant__ int    c_nz;
-  extern __constant__ int    c_have_rho;
+#endif
 
-  extern __constant__ float* c_d_rho;
+extern __device__ __constant__ int c_nx;
+extern __device__ __constant__ int c_ny;
+extern __device__ __constant__ int c_nz;
 
-  extern __constant__ float* c_x_edges;
-  extern __constant__ float* c_y_edges;
-  extern __constant__ float* c_z_edges;
+extern __device__ __constant__ int c_have_rho;
+
+extern __device__ __constant__ const float* c_d_rho;
+extern __device__ __constant__ const float* c_x_edges;
+extern __device__ __constant__ const float* c_y_edges;
+extern __device__ __constant__ const float* c_z_edges;
+
+#ifdef __cplusplus
 }
+#endif
 
 #if __CUDA_ARCH__ >= 350
   #define LDG(p) __ldg(p)
@@ -41,3 +49,4 @@ float fetch_density(int ix,int iy,int iz,int material_id){
         return density_LUT_CONST[material_id];
     }
 }
+
