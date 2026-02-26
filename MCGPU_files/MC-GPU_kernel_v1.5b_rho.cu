@@ -2548,69 +2548,6 @@ inline bool checkvoxbond_nonuniform(const GridParams* gp, const float3* p,
            (p->z >= z0 - tol && p->z <= z1 + tol);
 }
 
-// Like locate_voxel(), but disambiguates points sitting on faces by looking
-// at the ray direction. If p is exactly on x_edge(i):
-//   dx > 0 → choose ix = i     (enter +X voxel)
-//   dx < 0 → choose ix = i-1   (enter -X voxel)  (clamped to [0..nx-1])
-// If dx == 0 we keep the default (lower_bound) choice.
-#ifdef USING_CUDA
-__device__
-#endif
-inline unsigned int locate_voxel_entry(const float3 p_world,
-				       const float3 dir,
-				       short3* voxel_coord)
-{
-    const int nx = nx_dev(), ny = ny_dev(), nz = nz_dev();
-    const float EPS_local = 1e-6f;
-
-    // Outside quick check
-    if (p_world.x < x_edge(0) - EPS_local || p_world.x > x_edge(nx) + EPS_local ||
-        p_world.y < y_edge(0) - EPS_local || p_world.y > y_edge(ny) + EPS_local ||
-        p_world.z < z_edge(0) - EPS_local || p_world.z > z_edge(nz) + EPS_local)
-        return FLAG_OUTSIDE_VOXELS;
-
-    // Base indices from lower_bound (edge(i) <= p < edge(i+1))
-    int ix = lower_bound_edges(p_world.x, nx, x_edge);
-    int iy = lower_bound_edges(p_world.y, ny, y_edge);
-    int iz = lower_bound_edges(p_world.z, nz, z_edge);
-
-    if (ix < 0 || iy < 0 || iz < 0) return FLAG_OUTSIDE_VOXELS;
-
-    // Tie-break on faces: if |p - edge| <= EPS_local, bias by direction
-    const float exL = x_edge(ix), exR = x_edge(ix+1);
-    const float eyL = y_edge(iy), eyR = y_edge(iy+1);
-    const float ezL = z_edge(iz), ezR = z_edge(iz+1);
-
-    // X face
-    if (fabsf(p_world.x - exL) <= EPS_local) {
-        if (dir.x < 0.0f) ix = max(ix-1, 0);
-    } else if (fabsf(p_world.x - exR) <= EPS_local) {
-        if (dir.x > 0.0f) ix = min(ix+1, nx-1);
-    }
-    // Y face
-    if (fabsf(p_world.y - eyL) <= EPS_local) {
-        if (dir.y < 0.0f) iy = max(iy-1, 0);
-    } else if (fabsf(p_world.y - eyR) <= EPS_local) {
-        if (dir.y > 0.0f) iy = min(iy+1, ny-1);
-    }
-    // Z face
-    if (fabsf(p_world.z - ezL) <= EPS_local) {
-        if (dir.z < 0.0f) iz = max(iz-1, 0);
-    } else if (fabsf(p_world.z - ezR) <= EPS_local) {
-        if (dir.z > 0.0f) iz = min(iz+1, nz-1);
-    }
-
-    // Final bounds check (in case adjustments pushed us outside)
-    if (ix < 0 || ix >= nx || iy < 0 || iy >= ny || iz < 0 || iz >= nz)
-        return FLAG_OUTSIDE_VOXELS;
-
-    voxel_coord->x = (short)ix;
-    voxel_coord->y = (short)iy;
-    voxel_coord->z = (short)iz;
-
-    return (unsigned int)(ix + nx * (iy + (unsigned int)ny * iz));
-}
-
 // Return axis 0/1/2 for x/y/z face chosen, or -1 if none
 #ifdef USING_CUDA
 __device__

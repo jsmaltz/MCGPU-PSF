@@ -567,7 +567,7 @@ int main(int argc, char **argv)
   MAIN_THREAD printf("    -- Reading the energy spectrum and initializing the Walker aliasing sampling algorithm.\n");
   float mean_energy_spectrum = 0.0f;  
   init_energy_spectrum(file_name_espc, &source_energy_data, &mean_energy_spectrum);
-  
+  printf("    -- Read the energy spectrum.\n");
   
   // *** Output some of the data read to make sure everything was correctly read:
   MAIN_THREAD
@@ -1002,9 +1002,9 @@ int main(int argc, char **argv)
       fflush(stdout); 
       
       clock_kernel = clock();
-      
+      GridParams* d_gp = nullptr;	
       // -- Launch Monte Carlo simulation kernel for the speed test:
-      track_particles<<<blocks_speed_test,threads_speed_test>>>(histories_per_thread, (short int)num_p, seed_input_device, image_device, voxels_Edep_device, voxel_mat_dens_device, bitree_device, mfp_Woodcock_table_device, mfp_table_a_device, mfp_table_b_device, rayleigh_table_device, compton_table_device, detector_data_device, source_data_device, materials_dose_device, psf_data_device);
+      track_particles<<<blocks_speed_test,threads_speed_test>>>(histories_per_thread, (short int)num_p, seed_input_device, image_device, voxels_Edep_device, voxel_mat_dens_device, bitree_device, mfp_Woodcock_table_device, mfp_table_a_device, mfp_table_b_device, rayleigh_table_device, compton_table_device, detector_data_device, source_data_device, materials_dose_device, psf_data_device, d_gp);
       
       
       #ifdef USING_MPI    
@@ -1128,9 +1128,9 @@ int main(int argc, char **argv)
     
     clock_kernel = clock();
 
-    
+    GridParams* d_gp = nullptr;	
     // *** Execute the x-ray transport kernel in the GPU ***
-    track_particles<<<blocks,threads>>>(histories_per_thread, (short int)num_p, seed_input_device, image_device, voxels_Edep_device, voxel_mat_dens_device, bitree_device, mfp_Woodcock_table_device, mfp_table_a_device, mfp_table_b_device, rayleigh_table_device, compton_table_device, detector_data_device, source_data_device, materials_dose_device, psf_data_device, d_gp));
+    track_particles<<<blocks,threads>>>(histories_per_thread, (short int)num_p, seed_input_device, image_device, voxels_Edep_device, voxel_mat_dens_device, bitree_device, mfp_Woodcock_table_device, mfp_table_a_device, mfp_table_b_device, rayleigh_table_device, compton_table_device, detector_data_device, source_data_device, materials_dose_device, psf_data_device, d_gp);
     
 
 
@@ -2673,7 +2673,7 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
   float *d_xe=nullptr, *d_ye=nullptr, *d_ze=nullptr;
 
   printf("Uploading to device \n");
-  GridParams* d_gp = nullptr;
+  GridParams* d_gp = nullptr;	
   upload_grid_to_device(nx, ny, nz, E, h_rho, have_rho, d_rho, d_xe, d_ye, d_ze, d_gp);
   printf("Uploaded to device \n");
   
@@ -4848,7 +4848,8 @@ void init_energy_spectrum(char* file_name_espc, struct source_energy_struct* sou
     prob = -123456789.0f;  
     
     sscanf(new_line, "%f %f", &lower_energy_bin, &prob);     // Extract the lowest energy in the bin and the corresponding emission probability from the line read 
-            
+    printf("%s\n", new_line);
+    
     prob_espc_bin[current_bin]     = prob;
     source_energy_data->espc[current_bin] = lower_energy_bin;           
     
@@ -4879,6 +4880,7 @@ void init_energy_spectrum(char* file_name_espc, struct source_energy_struct* sou
     prob_espc_bin[i]     = 0.0f;
   }
 
+  printf("Bins = %d, max = %d \n", source_energy_data->num_bins_espc, MAX_ENERGY_BINS);
 
   // Compute the mean energy in the spectrum, taking into account the energy and prob of each bin:
   float all_energy = 0.0f;
@@ -4890,10 +4892,12 @@ void init_energy_spectrum(char* file_name_espc, struct source_energy_struct* sou
   }  
   *mean_energy_spectrum = all_energy/all_prob;
   
-          
+  printf("Mean energy = %2.2f keV\n", *mean_energy_spectrum);
+  
 // -- Init the Walker aliasing sampling method (as it is done in PENELOPE):
   IRND0(prob_espc_bin, source_energy_data->espc_cutoff, source_energy_data->espc_alias, source_energy_data->num_bins_espc);   //!!Walker!! Calling PENELOPE's function to init the Walker method
-       
+
+  printf("Finished sampling\n");
 // !!Verbose!! Test sampling
 // Sampling the x ray energy using the Walker aliasing algorithm from PENELOPE:
 // int sampled_bin = seeki_walker(source_energy_data->espc_cutoff, source_energy_data->espc_alias, 0.5, source_energy_data->num_bins_espc);

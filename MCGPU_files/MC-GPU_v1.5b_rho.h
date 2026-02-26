@@ -398,7 +398,7 @@ void init_dose_array_GPU(ulonglong2* voxels_Edep, int num_voxels_dose);
 
 #ifdef USING_CUDA
 __global__
-void track_particles(int histories_per_thread, short int num_p, int* seed_input_device, unsigned long long int* image, ulonglong2* voxels_Edep, int* voxel_mat_dens, char* bitree, float2* mfp_Woodcock_table, float3* mfp_table_a, float3* mfp_table_b, struct rayleigh_struct* rayleigh_table, struct compton_struct* compton_table, struct detector_struct* detector_data_array, struct source_struct* source_data_array, ulonglong2* materials_dose, struct struct_psf* psf_data);
+void track_particles(int histories_per_thread, short int num_p, int* seed_input_device, unsigned long long int* image, ulonglong2* voxels_Edep, int* voxel_mat_dens, char* bitree, float2* mfp_Woodcock_table, float3* mfp_table_a, float3* mfp_table_b, struct rayleigh_struct* rayleigh_table, struct compton_struct* compton_table, struct detector_struct* detector_data_array, struct source_struct* source_data_array, ulonglong2* materials_dose, struct struct_psf* psf_data, const GridParams* gp); // jsm gp
 #else
 void track_particles(int history_batch, int histories_per_thread, short int num_p, int seed_input, unsigned long long int* image, ulonglong2* voxels_Edep, int* voxel_mat_dens, float2* mfp_Woodcock_table, float3* mfp_table_a, float3* mfp_table_b, struct rayleigh_struct* rayleigh_table, struct compton_struct* compton_table, struct detector_struct* detector_data_array, struct source_struct* source_data_array, ulonglong2* materials_dose);
 #endif
