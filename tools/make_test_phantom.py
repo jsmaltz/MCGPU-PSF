@@ -79,8 +79,8 @@ def write_density_cube_gz(path_rho_gz: str, rho_gcc_zyx: np.ndarray):
 
 def main():
     # Geometry
-    nx, ny, nz = 10, 11, 5
-    voxel_size_cm = (0.1, 0.1, 0.1)
+    nx, ny, nz = 10, 20, 50
+    voxel_size_cm = (1, 0.5, 0.1)
     origin_cm = (0.0, 0.0, 0.0)                                  # OFFSET [cm]
     pitch_cm =  voxel_size_cm
     

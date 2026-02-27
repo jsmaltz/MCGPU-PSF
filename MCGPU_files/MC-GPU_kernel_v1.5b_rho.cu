@@ -256,6 +256,13 @@ __global__ void track_particles(int histories_per_thread,
 #ifdef USING_CUDA
   if (0==threadIdx.x)  // First GPU thread copies the variables to shared memory
   {
+    if (blockIdx.x==0 && threadIdx.x==0) {
+      printf("gp=%p nx=%d ny=%d nz=%d have_rho=%d\n",
+	     gp, gp ? gp->nx : -1, gp ? gp->ny : -1, gp ? gp->nz : -1, gp ? gp->have_rho : -1);
+      printf("ptrs: xe=%p ye=%p ze=%p rho=%p\n",
+	     gp ? gp->x_edges : 0, gp ? gp->y_edges : 0, gp ? gp->z_edges : 0, gp ? gp->d_rho : 0);
+  }
+    
 #endif
 
     // -Copy the current source, detector data from global to shared memory for fast access:
@@ -2586,3 +2593,134 @@ float fetch_density(const float* __restrict__ d_rho, bool have_rho,
     }
 }
 
+// Put this in a .cu compiled by nvcc (e.g., MC-GPU_kernel_v1.5b_rho.cu)
+// Requires: #include <cstdio> #include <cmath> (or use isnan/isfinite from cuda math)
+
+#ifndef GP_DEBUG_MAX_PRINT
+#define GP_DEBUG_MAX_PRINT 64   // max edges printed per axis if nx/ny/nz small
+#endif
+
+__device__ __forceinline__ bool isfinite_f(float x) {
+#if __CUDA_ARCH__
+  return isfinite(x);
+#else
+  return std::isfinite(x);
+#endif
+}
+
+__global__ void debug_gridparams_kernel(const GridParams* gp, int print_all_if_small)
+{
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+
+  printf("=== GridParams debug ===\n");
+  printf("gp=%p\n", (void*)gp);
+
+  if (!gp) {
+    printf("ERROR: gp is NULL\n");
+    return;
+  }
+
+  printf("nx=%d ny=%d nz=%d have_rho=%d\n", gp->nx, gp->ny, gp->nz, gp->have_rho);
+  printf("ptrs: x_edges=%p y_edges=%p z_edges=%p d_rho=%p\n",
+         (void*)gp->x_edges, (void*)gp->y_edges, (void*)gp->z_edges, (void*)gp->d_rho);
+
+  if (gp->nx <= 0 || gp->ny <= 0 || gp->nz <= 0) {
+    printf("ERROR: non-positive dims\n");
+    return;
+  }
+  if (!gp->x_edges || !gp->y_edges || !gp->z_edges) {
+    printf("ERROR: one or more edge pointers are NULL\n");
+    return;
+  }
+  if (gp->have_rho && !gp->d_rho) {
+    printf("WARNING: have_rho=1 but d_rho is NULL\n");
+  }
+
+  auto check_edges = [&](const char* name, const float* e, int n) {
+    // n is number of voxels, edges length is n+1
+    int len = n + 1;
+
+    // Print head/tail
+    float e0 = e[0];
+    float e1 = e[min(1, len-1)];
+    float elast = e[len-1];
+    float elastm1 = e[max(0, len-2)];
+
+    printf("%s: len=%d head=[%g, %g] tail=[%g, %g]\n",
+           name, len, e0, e1, elastm1, elast);
+
+    // Basic finiteness + monotonicity check
+    int bad_finite = 0;
+    int bad_mono = 0;
+    int bad_mono_i = -1;
+    float bad_a = 0.f, bad_b = 0.f;
+
+    float prev = e[0];
+    if (!isfinite_f(prev)) bad_finite++;
+
+    for (int i = 1; i < len; i++) {
+      float cur = e[i];
+      if (!isfinite_f(cur)) bad_finite++;
+
+      // strict monotonic increasing (adjust to <= if you allow repeats)
+      if (!(cur > prev)) {
+        if (bad_mono == 0) {
+          bad_mono_i = i-1;
+          bad_a = prev;
+          bad_b = cur;
+        }
+        bad_mono++;
+      }
+      prev = cur;
+    }
+
+    if (bad_finite) {
+      printf("ERROR: %s has %d non-finite values (NaN/Inf)\n", name, bad_finite);
+    }
+    if (bad_mono) {
+      printf("ERROR: %s not strictly increasing: %d violations; first at i=%d (%g -> %g)\n",
+             name, bad_mono, bad_mono_i, bad_a, bad_b);
+    } else {
+      printf("OK: %s strictly increasing\n", name);
+    }
+
+    // Optional: print all edges if small
+    if (print_all_if_small && len <= GP_DEBUG_MAX_PRINT) {
+      printf("%s edges:\n", name);
+      for (int i = 0; i < len; i++) {
+        printf("  %s[%d]=%g\n", name, i, e[i]);
+      }
+    }
+  };
+
+  check_edges("x_edges", gp->x_edges, gp->nx);
+  check_edges("y_edges", gp->y_edges, gp->ny);
+  check_edges("z_edges", gp->z_edges, gp->nz);
+
+  // Optional: quick rho sanity if present
+  if (gp->have_rho && gp->d_rho) {
+    unsigned long long nvox = (unsigned long long)gp->nx * gp->ny * gp->nz;
+    printf("rho: nvox=%llu\n", nvox);
+
+    // Sample a few indices (start/middle/end)
+    unsigned long long idxs[5];
+    idxs[0] = 0;
+    idxs[1] = (nvox > 1) ? 1 : 0;
+    idxs[2] = (nvox > 2) ? (nvox / 2) : 0;
+    idxs[3] = (nvox > 3) ? (nvox - 2) : 0;
+    idxs[4] = (nvox > 0) ? (nvox - 1) : 0;
+
+    int bad_rho = 0;
+    for (int k = 0; k < 5; k++) {
+      unsigned long long idx = idxs[k];
+      float r = gp->d_rho[idx];
+      if (!isfinite_f(r) || r < 0.f) bad_rho++;
+      printf("  rho[%llu]=%g\n", idx, r);
+    }
+    if (bad_rho) {
+      printf("WARNING: rho sample had %d suspicious values (non-finite or negative)\n", bad_rho);
+    }
+  }
+
+  printf("=== GridParams debug done ===\n");
+}

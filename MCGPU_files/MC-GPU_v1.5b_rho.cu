@@ -372,6 +372,7 @@
  */ 
 ////////////////////////////////////////////////////////////////////////////////////////
 
+
 //jsm added:
 #include <zlib.h>
 #include <cuda_runtime_api.h>
@@ -381,6 +382,7 @@
 #ifndef cudaThreadExit
 #define cudaThreadExit cudaDeviceReset
 #endif
+
 
 // Get device clock in GHz (CUDA 13 switched away from struct fields)
 static inline float mcgpu_clock_GHz(int gpu_id, const cudaDeviceProp* prop) {
@@ -425,6 +427,9 @@ static inline int mcgpu_kernel_timeout(int gpu_id, const cudaDeviceProp* prop) {
 //!                            @author  Andreu Badal
 //!
 ////////////////////////////////////////////////////////////////////////////////
+
+static GridParams* g_d_gp = nullptr;
+
 int main(int argc, char **argv)
 {
 
@@ -475,6 +480,7 @@ int main(int argc, char **argv)
     
   
 #ifdef USING_CUDA
+  
   // The "MAIN_THREAD" macro prints the messages just once when using MPI threads (it has no effect if MPI is not used):  MAIN_THREAD == "if(0==myID)"
   MAIN_THREAD printf  ("\n             *** CUDA SIMULATION IN THE GPU ***\n");
   MAIN_THREAD printf  ("\n             *** JSM version for CUDA13 ***\n");  
@@ -559,9 +565,8 @@ int main(int argc, char **argv)
   char file_name_voxels[250], file_name_materials[MAX_MATERIALS][250], file_name_output[250], file_dose_output[250], file_name_espc[250];
 
   // *** Read the input file given in the command line and return the significant data:
-  read_input(argc, argv, myID, &total_histories, &seed_input, &gpu_id, &num_threads_per_block, &histories_per_thread, detector_data, &image, &image_bytes, source_data, &source_energy_data, &voxel_data, file_name_voxels, file_name_materials, file_name_output, file_name_espc, &num_projections, &voxels_Edep, &voxels_Edep_bytes, file_dose_output, &dose_ROI_x_min, &dose_ROI_x_max, &dose_ROI_y_min, &dose_ROI_y_max, &dose_ROI_z_min, &dose_ROI_z_max, &SRotAxisD, &translation_helical, &flag_material_dose, &flag_simulateMammoAfterDBT, &flag_detectorFixed, psf_data);
-
-
+  EdgeVectors E;  // will be filled by read_input
+  read_input(argc, argv, myID, &total_histories, &seed_input, &gpu_id, &num_threads_per_block, &histories_per_thread, detector_data, &image, &image_bytes, source_data, &source_energy_data, &voxel_data, file_name_voxels, file_name_materials, file_name_output, file_name_espc, &num_projections, &voxels_Edep, &voxels_Edep_bytes, file_dose_output, &dose_ROI_x_min, &dose_ROI_x_max, &dose_ROI_y_min, &dose_ROI_y_max, &dose_ROI_z_min, &dose_ROI_z_max, &SRotAxisD, &translation_helical, &flag_material_dose, &flag_simulateMammoAfterDBT, &flag_detectorFixed, psf_data, E);
 
   // *** Read the energy spectrum and initialize its sampling with the Walker aliasing method:
   MAIN_THREAD printf("    -- Reading the energy spectrum and initializing the Walker aliasing sampling algorithm.\n");
@@ -703,18 +708,55 @@ int main(int argc, char **argv)
       // -- Read binary RAW format geometry: geometric parameters given in input file              !!DBTv1.4!! 
       load_voxels_binary_VICTRE(myID, file_name_voxels, density_max, &voxel_data, &voxel_mat_dens, &voxel_mat_dens_bytes, &dose_ROI_x_max, &dose_ROI_y_max, &dose_ROI_z_max);   //!!DBT!!    // !!DBTv1.4!!
     }
+   
+    // -- Pre-compute the total mass of each material present in the voxel phantom
+    //    (to be used in "report_materials_dose"):
 
-    // -- Pre-compute the total mass of each material present in the voxel phantom (to be used in "report_materials_dose"):
-    double voxel_volume = 1.0 / ( ((double)voxel_data.inv_voxel_size.x) * ((double)voxel_data.inv_voxel_size.y) * ((double)voxel_data.inv_voxel_size.z) );
-    for(kk=0; kk<MAX_MATERIALS; kk++)
-      mass_materials[kk] = 0.0;
-    long long int llk;
-    for(llk=0; llk<((long long int)voxel_data.num_voxels.x*(long long int)voxel_data.num_voxels.y*(long long int)voxel_data.num_voxels.z); llk++)  // For each voxel in the geometry
-    {
-          //     mass_materials[((int)voxel_mat_dens[llk].x)-1] += ((double)voxel_mat_dens[llk].y)*voxel_volume;        // Add material mass = density*volume
-      mass_materials[((int)voxel_mat_dens[llk])] += ((double)density_LUT[((int)voxel_mat_dens[llk])])*voxel_volume;      // Add material mass = density*volume (first material==0)    //!!FixedDensity_DBT!! Density taken from function "density_LOT"
-    }
     
+    for (kk = 0; kk < MAX_MATERIALS; kk++)
+      mass_materials[kk] = 0.0;
+
+    const int nx = (int)voxel_data.num_voxels.x;
+    const int ny = (int)voxel_data.num_voxels.y;
+    const int nz = (int)voxel_data.num_voxels.z;
+
+    // Sanity (optional but recommended)
+    if ((int)E.x.size() != nx + 1 || (int)E.y.size() != ny + 1 || (int)E.z.size() != nz + 1) {
+      printf("ERROR: edge vector lengths mismatch: x=%d (need %d), y=%d (need %d), z=%d (need %d)\n",
+	     (int)E.x.size(), nx+1, (int)E.y.size(), ny+1, (int)E.z.size(), nz+1);
+      exit(-1);
+    }
+
+    const long long nxy = (long long)nx * (long long)ny;
+    const long long nvox = nxy * (long long)nz;
+
+    for (long long llk = 0; llk < nvox; llk++)  // For each voxel in the geometry
+    {
+      // Convert linear index -> (i,j,k) with x fastest
+      const int i = (int)(llk % nx);
+      const int j = (int)((llk / nx) % ny);
+      const int k = (int)(llk / nxy);
+
+      // Non-uniform voxel volume from edges (cm^3 if edges are in cm)
+      const double dx = (double)E.x[i + 1] - (double)E.x[i];
+      const double dy = (double)E.y[j + 1] - (double)E.y[j];
+      const double dz = (double)E.z[k + 1] - (double)E.z[k];
+      const double voxel_volume = dx * dy * dz;
+
+      // Material index (0-based in your current "FixedDensity_DBT" path)
+      const int mat = (int)voxel_mat_dens[llk];
+
+      if (mat < 0 || mat >= MAX_MATERIALS) {
+	// Guard against corrupted voxel IDs
+	// (or continue; depends on how strict you want to be)
+	printf("ERROR: voxel material out of range at llk=%lld -> mat=%d\n", llk, mat);
+	exit(-1);
+      }
+
+      // Add material mass = density * volume
+      // (density_LUT indexed by 0-based material; units g/cm^3 -> mass in g)
+      mass_materials[mat] += ((double)density_LUT[mat]) * voxel_volume;
+    }
     
     // ** Create the low resolution version of the phantom and the binary tree structures, if requested in the input file and dose dep tally disabled:   //!!bitree!! v1.5b
     if ((voxel_data.num_voxels_coarse.x)!=0)
@@ -729,8 +771,7 @@ int main(int argc, char **argv)
       
       #ifdef DISABLE_CANON
         MAIN_THREAD printf("       !!bitree!! Tree branch canonicalization was disabled by defining the pre-processor parameter \"DISABLE_CANON\"\n");  // !!bitree!! v1.5b    !!DeBuG!!
-      #endif
-      
+      #endif      
       
       create_bitree(myID, &voxel_data, voxel_mat_dens, &bitree, &bitree_bytes, &voxel_geometry_LowRes, &voxel_geometry_LowRes_bytes);     //!!bitree!! v1.5b
       
@@ -1000,11 +1041,12 @@ int main(int argc, char **argv)
         printf("        ==> CUDA: Estimating the GPU speed executing %d blocks of %d threads, %d histories per thread: %lld histories in total.\n", num_blocks_speed_test, num_threads_per_block, histories_per_thread, histories_speed_test);
       #endif  
       fflush(stdout); 
-      
+
       clock_kernel = clock();
-      GridParams* d_gp = nullptr;	
       // -- Launch Monte Carlo simulation kernel for the speed test:
-      track_particles<<<blocks_speed_test,threads_speed_test>>>(histories_per_thread, (short int)num_p, seed_input_device, image_device, voxels_Edep_device, voxel_mat_dens_device, bitree_device, mfp_Woodcock_table_device, mfp_table_a_device, mfp_table_b_device, rayleigh_table_device, compton_table_device, detector_data_device, source_data_device, materials_dose_device, psf_data_device, d_gp);
+      if (!g_d_gp) { printf("FATAL: g_d_gp is null at kernel launch\n"); exit(1); }
+      
+      track_particles<<<blocks_speed_test,threads_speed_test>>>(histories_per_thread, (short int)num_p, seed_input_device, image_device, voxels_Edep_device, voxel_mat_dens_device, bitree_device, mfp_Woodcock_table_device, mfp_table_a_device, mfp_table_b_device, rayleigh_table_device, compton_table_device, detector_data_device, source_data_device, materials_dose_device, psf_data_device, g_d_gp);
       
       
       #ifdef USING_MPI    
@@ -1128,9 +1170,12 @@ int main(int argc, char **argv)
     
     clock_kernel = clock();
 
-    GridParams* d_gp = nullptr;	
+    //    GridParams* d_gp = nullptr;	
     // *** Execute the x-ray transport kernel in the GPU ***
-    track_particles<<<blocks,threads>>>(histories_per_thread, (short int)num_p, seed_input_device, image_device, voxels_Edep_device, voxel_mat_dens_device, bitree_device, mfp_Woodcock_table_device, mfp_table_a_device, mfp_table_b_device, rayleigh_table_device, compton_table_device, detector_data_device, source_data_device, materials_dose_device, psf_data_device, d_gp);
+
+    if (!g_d_gp) { printf("FATAL: g_d_gp is null at kernel launch\n"); exit(1); }
+    
+    track_particles<<<blocks,threads>>>(histories_per_thread, (short int)num_p, seed_input_device, image_device, voxels_Edep_device, voxel_mat_dens_device, bitree_device, mfp_Woodcock_table_device, mfp_table_a_device, mfp_table_b_device, rayleigh_table_device, compton_table_device, detector_data_device, source_data_device, materials_dose_device, psf_data_device, g_d_gp);
     
 
 
@@ -1482,7 +1527,7 @@ int main(int argc, char **argv)
 #endif
         
     // -- Report the total dose for all the projections:
-    MAIN_THREAD report_voxels_dose(file_dose_output, num_projections, &voxel_data, voxel_mat_dens, voxels_Edep, time_total_MC_simulation, total_histories, dose_ROI_x_min, dose_ROI_x_max, dose_ROI_y_min, dose_ROI_y_max, dose_ROI_z_min, dose_ROI_z_max, source_data);
+    MAIN_THREAD report_voxels_dose(file_dose_output, num_projections, &voxel_data, voxel_mat_dens, voxels_Edep, time_total_MC_simulation, total_histories, dose_ROI_x_min, dose_ROI_x_max, dose_ROI_y_min, dose_ROI_y_max, dose_ROI_z_min, dose_ROI_z_max, source_data, E);
   }
   
   
@@ -1650,6 +1695,15 @@ static inline void CUDA_OK(cudaError_t e, const char* msg){
     if (e != cudaSuccess) { fprintf(stderr, "CUDA error: %s (%s)\n", msg, cudaGetErrorString(e)); std::abort(); }
 }
 
+static void debug_gridparams_on_device(const GridParams* d_gp, int print_all_if_small)
+{
+  printf("HOST: debug_gridparams_on_device d_gp=%p\n", (void*)d_gp);
+  CUDA_OK(cudaGetLastError(), "pre debug kernel");
+  debug_gridparams_kernel<<<1, 1>>>(d_gp, print_all_if_small);
+  CUDA_OK(cudaGetLastError(), "launch debug kernel");
+  CUDA_OK(cudaDeviceSynchronize(), "sync debug kernel");
+}
+
 static bool read_edge_file(const char* path, std::vector<float>& out, int expected_len){
     if (!path || !*path) return false;
     FILE* f = nullptr;
@@ -1676,9 +1730,6 @@ static void synthesize_uniform_edges(std::vector<float>& e, int n, float o0, flo
     for (int i = 0; i <= n; ++i) e[i] = o0 + i * pitch;
 }
 
-struct EdgeVectors {
-    std::vector<float> x, y, z;
-};
 
 // Replace these accessors with your actual source of uniform spacing/origin.
 // Fallbacks shown here:
@@ -1760,6 +1811,15 @@ static EdgeVectors build_edges(
 
 #include "grid_params.cuh"
 
+__device__ __forceinline__
+double gp_voxel_volume(const GridParams* gp, int ix, int iy, int iz)
+{
+    double dx = (double)(gp->x_edges[ix+1] - gp->x_edges[ix]);
+    double dy = (double)(gp->y_edges[iy+1] - gp->y_edges[iy]);
+    double dz = (double)(gp->z_edges[iz+1] - gp->z_edges[iz]);
+    return dx * dy * dz;
+}
+
 // NOTE: d_rho_out/d_xe_out/... should be initialized by caller if you want to preserve existing allocations.
 // This function does not free previous allocations (same behavior as your original).
 static void upload_grid_to_device(
@@ -1810,6 +1870,7 @@ static void upload_grid_to_device(
     // -----------------------------------------
     // 3) Upload a GridParams struct to device
     // -----------------------------------------
+    
     GridParams h_gp{};
     h_gp.nx = nx;
     h_gp.ny = ny;
@@ -1820,62 +1881,33 @@ static void upload_grid_to_device(
     h_gp.y_edges = d_ye;
     h_gp.z_edges = d_ze;
 
+    printf("h_gp=%p nx=%d ny=%d nz=%d have_rho=%d\n",
+	   (void*)&h_gp, h_gp.nx, h_gp.ny, h_gp.nz, h_gp.have_rho);
+     
     GridParams* d_gp = nullptr;
     CUDA_OK(cudaMalloc((void**)&d_gp, sizeof(GridParams)), "malloc d_gp");
     CUDA_OK(cudaMemcpy(d_gp, &h_gp, sizeof(GridParams), cudaMemcpyHostToDevice), "copy d_gp");
 
+    printf("d_gp=%p\n", (void*)d_gp);
+
     d_gp_out = d_gp;
-}
-static void upload_grid_to_device_old(
-    int nx, int ny, int nz,
-    const EdgeVectors& E,
-    const float* h_rho, bool have_rho,
-    float*& d_rho_out,   // returned (optional)
-    float*& d_xe_out, float*& d_ye_out, float*& d_ze_out) // returned (optional)
-{
-
-    void* addr = nullptr;
-    cudaError_t e = cudaGetSymbolAddress(&addr, c_nx);
-    printf("cudaGetSymbolAddress(c_nx): %s addr=%p\n", cudaGetErrorString(e), addr);
     
-    // Dims + flags
-    CUDA_OK(cudaMemcpyToSymbol(c_nx, &nx, sizeof(int)), "copy c_nx");
-    CUDA_OK(cudaMemcpyToSymbol(c_ny, &ny, sizeof(int)), "copy c_ny");
-    CUDA_OK(cudaMemcpyToSymbol(c_nz, &nz, sizeof(int)), "copy c_nz");
-    int have_rho_i = have_rho ? 1 : 0;
-    CUDA_OK(cudaMemcpyToSymbol(c_have_rho, &have_rho_i, sizeof(int)), "copy c_have_rho");
+    GridParams h_gp_check{};
+    CUDA_OK(cudaMemcpy(&h_gp_check, d_gp, sizeof(GridParams), cudaMemcpyDeviceToHost),
+	    "copy d_gp back");
 
-    // Density
-    float* d_rho = nullptr;
-    if (have_rho && h_rho){
-        const size_t nvox = (size_t)nx * ny * nz;
-        CUDA_OK(cudaMalloc((void**)&d_rho, nvox*sizeof(float)), "malloc d_rho");
-        CUDA_OK(cudaMemcpy(d_rho, h_rho, nvox*sizeof(float), cudaMemcpyHostToDevice), "copy d_rho");
-        CUDA_OK(cudaMemcpyToSymbol(c_d_rho, &d_rho, sizeof(d_rho)), "set c_d_rho");
-    } else {
-        float* nullp = nullptr;
-        CUDA_OK(cudaMemcpyToSymbol(c_d_rho, &nullp, sizeof(nullp)), "clear c_d_rho");
-    }
-    if (d_rho_out) d_rho_out = d_rho;
+    printf("d_gp contents: nx=%d ny=%d nz=%d have_rho=%d d_rho=%p xe=%p ye=%p ze=%p\n",
+	   h_gp_check.nx, h_gp_check.ny, h_gp_check.nz, h_gp_check.have_rho,
+	   (void*)h_gp_check.d_rho, (void*)h_gp_check.x_edges,
+	   (void*)h_gp_check.y_edges, (void*)h_gp_check.z_edges);
 
-    // Edge arrays: allocate on device, copy, then set pointer constants
-    float *d_xe=nullptr, *d_ye=nullptr, *d_ze=nullptr;
-    CUDA_OK(cudaMalloc((void**)&d_xe, (nx+1)*sizeof(float)), "malloc d_xe");
-    CUDA_OK(cudaMalloc((void**)&d_ye, (ny+1)*sizeof(float)), "malloc d_ye");
-    CUDA_OK(cudaMalloc((void**)&d_ze, (nz+1)*sizeof(float)), "malloc d_ze");
+    cudaPointerAttributes a{};
+    CUDA_OK(cudaPointerGetAttributes(&a, h_gp_check.d_rho), "attr d_rho");
 
-    CUDA_OK(cudaMemcpy(d_xe, E.x.data(), (nx+1)*sizeof(float), cudaMemcpyHostToDevice), "copy x_edges");
-    CUDA_OK(cudaMemcpy(d_ye, E.y.data(), (ny+1)*sizeof(float), cudaMemcpyHostToDevice), "copy y_edges");
-    CUDA_OK(cudaMemcpy(d_ze, E.z.data(), (nz+1)*sizeof(float), cudaMemcpyHostToDevice), "copy z_edges");
-
-    CUDA_OK(cudaMemcpyToSymbol(c_x_edges, &d_xe, sizeof(d_xe)), "set c_x_edges");
-    CUDA_OK(cudaMemcpyToSymbol(c_y_edges, &d_ye, sizeof(d_ye)), "set c_y_edges");
-    CUDA_OK(cudaMemcpyToSymbol(c_z_edges, &d_ze, sizeof(d_ze)), "set c_z_edges");
-
-    if (d_xe_out) d_xe_out = d_xe;
-    if (d_ye_out) d_ye_out = d_ye;
-    if (d_ze_out) d_ze_out = d_ze;
-}
+    printf("caller will receive via &d_gp_out=%p (address of caller var)\n", (void*)d_gp_out);
+    
+ 
+ }
 
 // start JSM density mods
 int load_density_cube(const char* path,
@@ -1940,8 +1972,10 @@ int load_density_cube(const char* path,
 //!       @param[out] file_name_materials
 //!       @param[out] file_name_output
 ////////////////////////////////////////////////////////////////////////////////
-void read_input(int argc, char** argv, int myID, unsigned long long int* total_histories, int* seed_input, int* gpu_id, int* num_threads_per_block, int* histories_per_thread, struct detector_struct* detector_data, unsigned long long int** image_ptr, int* image_bytes, struct source_struct* source_data, struct source_energy_struct* source_energy_data, struct voxel_struct* voxel_data, char* file_name_voxels, char file_name_materials[MAX_MATERIALS][250] , char* file_name_output, char* file_name_espc, int* num_projections, ulonglong2** voxels_Edep_ptr, int* voxels_Edep_bytes, char* file_dose_output, short int* dose_ROI_x_min, short int* dose_ROI_x_max, short int* dose_ROI_y_min, short int* dose_ROI_y_max, short int* dose_ROI_z_min, short int* dose_ROI_z_max, double* SRotAxisD, double* translation_helical, int* flag_material_dose, bool* flag_simulateMammoAfterDBT, bool* flag_detectorFixed, struct psf_struct* psf_data)
+void read_input(int argc, char** argv, int myID, unsigned long long int* total_histories, int* seed_input, int* gpu_id, int* num_threads_per_block, int* histories_per_thread, struct detector_struct* detector_data, unsigned long long int** image_ptr, int* image_bytes, struct source_struct* source_data, struct source_energy_struct* source_energy_data, struct voxel_struct* voxel_data, char* file_name_voxels, char file_name_materials[MAX_MATERIALS][250] , char* file_name_output, char* file_name_espc, int* num_projections, ulonglong2** voxels_Edep_ptr, int* voxels_Edep_bytes, char* file_dose_output, short int* dose_ROI_x_min, short int* dose_ROI_x_max, short int* dose_ROI_y_min, short int* dose_ROI_y_max, short int* dose_ROI_z_min, short int* dose_ROI_z_max, double* SRotAxisD, double* translation_helical, int* flag_material_dose, bool* flag_simulateMammoAfterDBT, bool* flag_detectorFixed, struct psf_struct* psf_data, EdgeVectors& E_out) 
 {
+
+  E_out = EdgeVectors{};
   FILE* file_ptr = NULL;
   char new_line[400];
   char *new_line_ptr = NULL;
@@ -2668,14 +2702,17 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
   }
 
   EdgeVectors E = build_edges(nx, ny, nz, vox_edge_path, x_edges_file, y_edges_file, z_edges_file, G);
-
+  E_out = E;
+    
   // Upload density + edges and bind constants
   float *d_xe=nullptr, *d_ye=nullptr, *d_ze=nullptr;
 
   printf("Uploading to device \n");
-  GridParams* d_gp = nullptr;	
-  upload_grid_to_device(nx, ny, nz, E, h_rho, have_rho, d_rho, d_xe, d_ye, d_ze, d_gp);
-  printf("Uploaded to device \n");
+  upload_grid_to_device(nx, ny, nz, E, h_rho, have_rho, d_rho, d_xe, d_ye, d_ze, g_d_gp);
+  printf("Uploaded to device, returned g_d_gp=%p \n", (void*)g_d_gp);
+
+  debug_gridparams_on_device(g_d_gp, /*print_all_if_small=*/1);
+
   
   // JSM add in density array read, end
   
@@ -4171,8 +4208,6 @@ int report_image(char* file_name_output, struct detector_struct* detector_data, 
     fwrite(&energy_multiscatter_array[i], sizeof(float), 1, file_binary_ptr);  // Multiple-scatter image
 */
 
-
-
 // //!!DeBuG!! REPORT THE PIXEL ENERGY PRIMARY AFTER THE SAMPLED CHARGES FOR DEBUGGING; NOT NORMALIZED!
 //   for(i=0; i<pixels_per_image; i++)
 //   {
@@ -4217,7 +4252,7 @@ int report_image(char* file_name_output, struct detector_struct* detector_data, 
 //!       @param[in] source_data   Data required to compute the voxel plane to report in ASCII format: Z at the level of the source, 1st projection
 ////////////////////////////////////////////////////////////////////////////////
 // int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel_struct* voxel_data, float2* voxel_mat_dens, ulonglong2* voxels_Edep, double time_total_MC_init_report, unsigned long long int total_histories, short int dose_ROI_x_min, short int dose_ROI_x_max, short int dose_ROI_y_min, short int dose_ROI_y_max, short int dose_ROI_z_min, short int dose_ROI_z_max, struct source_struct* source_data)
-int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel_struct* voxel_data, int* voxel_mat_dens, ulonglong2* voxels_Edep, double time_total_MC_init_report, unsigned long long int total_histories, short int dose_ROI_x_min, short int dose_ROI_x_max, short int dose_ROI_y_min, short int dose_ROI_y_max, short int dose_ROI_z_min, short int dose_ROI_z_max, struct source_struct* source_data)  //!!FixedDensity_DBT!! 
+int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel_struct* voxel_data, int* voxel_mat_dens, ulonglong2* voxels_Edep, double time_total_MC_init_report, unsigned long long int total_histories, short int dose_ROI_x_min, short int dose_ROI_x_max, short int dose_ROI_y_min, short int dose_ROI_y_max, short int dose_ROI_z_min, short int dose_ROI_z_max, struct source_struct* source_data, struct EdgeVectors E)
 {
   printf("\n\n          *** VOXEL ROI DOSE TALLY REPORT ***\n\n");
     
@@ -4247,7 +4282,25 @@ int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel
       DZ = dose_ROI_z_max - dose_ROI_z_min + 1;           
       
   // -- Calculate the dose plane that will be output as ASCII text:
-  int z_plane_dose = (int)(source_data[0].position.z * voxel_data->inv_voxel_size.z + 0.00001f);  // Select voxel plane at the level of the source, 1st projections
+
+  double zpos = (double)source_data[0].position.z;
+
+  auto it = std::upper_bound(E.z.begin(),
+			     E.z.end(),
+			     zpos);
+
+  int z_plane_dose = (int)(it - E.z.begin()) - 1;
+  
+  // Clamp to valid range
+  if (z_plane_dose < 0)
+    z_plane_dose = 0;
+  
+  if (z_plane_dose >= voxel_data->num_voxels.z)
+    z_plane_dose = voxel_data->num_voxels.z - 1;
+
+  if (z_plane_dose < dose_ROI_z_min || z_plane_dose > dose_ROI_z_max)
+    z_plane_dose = (dose_ROI_z_max + dose_ROI_z_min) / 2;
+
   if ( (z_plane_dose<dose_ROI_z_min) || (z_plane_dose>dose_ROI_z_max) )
     z_plane_dose = (dose_ROI_z_max+dose_ROI_z_min)/2;
   
@@ -4837,8 +4890,9 @@ void init_energy_spectrum(char* file_name_espc, struct source_energy_struct* sou
       exit(-1);
     }
 
-    new_line_ptr = fgets_trimmed(new_line, 250, file_ptr);   // Read the following line of text skipping comments and extra spaces
-    
+    new_line_ptr = fgets(new_line, 250, file_ptr);
+      //new_line_ptr = fgets_trimmed(new_line, 250, file_ptr);   // Read the following line of text skipping comments and extra spaces
+
     if (new_line_ptr==NULL)
     {
       printf("\n\n   !!init_energy_spectrum ERROR!! The input file for the x ray spectrum (%s) is not readable or incomplete (a negative probability marks the end of the spectrum).\n", file_name_espc);
@@ -4846,9 +4900,15 @@ void init_energy_spectrum(char* file_name_espc, struct source_energy_struct* sou
     }
     
     prob = -123456789.0f;  
-    
-    sscanf(new_line, "%f %f", &lower_energy_bin, &prob);     // Extract the lowest energy in the bin and the corresponding emission probability from the line read 
-    printf("%s\n", new_line);
+
+    new_line[249] = '\0';
+    int n = sscanf(new_line, "%f %f", &lower_energy_bin, &prob);
+    if (n != 2) {
+      printf("\n !!init_energy_spectrum ERROR!!: bad line in spectrum file: \"%s\"\n", new_line);
+      exit(-1);
+    }
+    // prints at most 249 chars even if missing '\0'
+    //printf("%.*s\n", 249, new_line);
     
     prob_espc_bin[current_bin]     = prob;
     source_energy_data->espc[current_bin] = lower_energy_bin;           
@@ -4867,10 +4927,15 @@ void init_energy_spectrum(char* file_name_espc, struct source_energy_struct* sou
   } 
   while (prob > -1.0e-11f);     // A negative probability marks the end of the spectrum
 
+  fclose(file_ptr);
+  
+  //printf("lower_energy_bin = %f keV, current_bin = %d \n", lower_energy_bin, current_bin);
 
   // Store the number of bins read from the input energy spectrum file:
   source_energy_data->num_bins_espc = current_bin;
 
+  //fprintf(stdout, "Pre: Bins = %d, max = %d \n", source_energy_data->num_bins_espc, MAX_ENERGY_BINS);
+  //fflush(stdout);
 
   // Init the remaining bins (which will not be used) with the last energy read (will be assumed as the highest energy in the last bin) and 0 probability of emission.
   register int i;
@@ -4880,7 +4945,8 @@ void init_energy_spectrum(char* file_name_espc, struct source_energy_struct* sou
     prob_espc_bin[i]     = 0.0f;
   }
 
-  printf("Bins = %d, max = %d \n", source_energy_data->num_bins_espc, MAX_ENERGY_BINS);
+  //fprintf(stdout,"Bins = %d, max = %d \n", source_energy_data->num_bins_espc, MAX_ENERGY_BINS);
+  //fflush(stdout);
 
   // Compute the mean energy in the spectrum, taking into account the energy and prob of each bin:
   float all_energy = 0.0f;
@@ -4892,12 +4958,14 @@ void init_energy_spectrum(char* file_name_espc, struct source_energy_struct* sou
   }  
   *mean_energy_spectrum = all_energy/all_prob;
   
-  printf("Mean energy = %2.2f keV\n", *mean_energy_spectrum);
-  
+  //fprintf(stdout, "Mean energy = %2.2f keV\n", *mean_energy_spectrum);
+  //fflush(stdout);
+ 
+
 // -- Init the Walker aliasing sampling method (as it is done in PENELOPE):
   IRND0(prob_espc_bin, source_energy_data->espc_cutoff, source_energy_data->espc_alias, source_energy_data->num_bins_espc);   //!!Walker!! Calling PENELOPE's function to init the Walker method
 
-  printf("Finished sampling\n");
+  //printf("Finished sampling\n");
 // !!Verbose!! Test sampling
 // Sampling the x ray energy using the Walker aliasing algorithm from PENELOPE:
 // int sampled_bin = seeki_walker(source_energy_data->espc_cutoff, source_energy_data->espc_alias, 0.5, source_energy_data->num_bins_espc);
