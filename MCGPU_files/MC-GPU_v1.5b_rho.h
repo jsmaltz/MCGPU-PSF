@@ -336,7 +336,7 @@ void update_seed_PRNG(int batch_number, unsigned long long int total_histories, 
 void IRND0(float *W, float *F, short int *K, int N);
 int report_materials_dose(int num_projections, unsigned long long int total_histories, float *density_nominal, ulonglong2 *materials_dose, double *mass_materials, char file_name_materials[MAX_MATERIALS][250]);
 // PHASE SPACE FILE REPORT
-int report_psf(char* file_name_output, struct psf_struct* psf_data, struct voxel_struct* voxel_data);
+int report_psf(const char* file_name_output, struct psf_struct* psf_data, const struct voxel_struct* voxel_data, const EdgeVectors& E);
 
 
 // #ifdef USING_CUDA

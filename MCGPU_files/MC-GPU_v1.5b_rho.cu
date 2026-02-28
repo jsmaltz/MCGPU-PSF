@@ -688,7 +688,7 @@ int main(int argc, char **argv)
   
   fflush(stdout);
 
-    double mass_materials[MAX_MATERIALS];
+  double mass_materials[MAX_MATERIALS];
     
   // !!bitree!! If the binary tree is used, read the geometry only with the MAIN thread, and then broadcast the new data:
   //            if the tree is not used, every thread reads the input geometry at the same time.
@@ -698,20 +698,11 @@ int main(int argc, char **argv)
 
     // *** Read the voxel data and allocate the density map matrix. Return the maximum density:
     
-    if (voxel_data.num_voxels.x<1)
-    {
-      // -- Read ASCII format geometry: geometric parameters will be read from the header file     !!DBTv1.4!! 
-      load_voxels(myID, file_name_voxels, density_max, &voxel_data, &voxel_mat_dens, &voxel_mat_dens_bytes, &dose_ROI_x_max, &dose_ROI_y_max, &dose_ROI_z_max);
-    }
-    else
-    {
-      // -- Read binary RAW format geometry: geometric parameters given in input file              !!DBTv1.4!! 
-      load_voxels_binary_VICTRE(myID, file_name_voxels, density_max, &voxel_data, &voxel_mat_dens, &voxel_mat_dens_bytes, &dose_ROI_x_max, &dose_ROI_y_max, &dose_ROI_z_max);   //!!DBT!!    // !!DBTv1.4!!
-    }
+    //-- Read ASCII format geometry: geometric parameters will be read from the header file     !!DBTv1.4!! 
+    load_voxels(myID, file_name_voxels, density_max, &voxel_data, &voxel_mat_dens, &voxel_mat_dens_bytes, &dose_ROI_x_max, &dose_ROI_y_max, &dose_ROI_z_max);
    
     // -- Pre-compute the total mass of each material present in the voxel phantom
     //    (to be used in "report_materials_dose"):
-
     
     for (kk = 0; kk < MAX_MATERIALS; kk++)
       mass_materials[kk] = 0.0;
@@ -719,6 +710,8 @@ int main(int argc, char **argv)
     const int nx = (int)voxel_data.num_voxels.x;
     const int ny = (int)voxel_data.num_voxels.y;
     const int nz = (int)voxel_data.num_voxels.z;
+    
+    printf("nx = %d, ny = %d, nz = %d\n", nx, ny, nz);
 
     // Sanity (optional but recommended)
     if ((int)E.x.size() != nx + 1 || (int)E.y.size() != ny + 1 || (int)E.z.size() != nz + 1) {
@@ -1351,8 +1344,7 @@ int main(int argc, char **argv)
         printf("\n       -- Time reducing the images simulated by all the MPI threads (MPI_Reduce) according to the MAIN thread = %.6f s.\n", ((double)(clock()-clock_start))/CLOCKS_PER_SEC); 
       }
     }
-#endif
-                
+#endif               
 
     // *** Report the final results:
     char file_name_output_num_p[253];
@@ -1368,14 +1360,14 @@ int main(int argc, char **argv)
     {     
       MAIN_THREAD report_image(file_name_output_num_p, detector_data, source_data, mean_energy_spectrum, image, time_elapsed_MC_loop, total_histories, num_p, num_projections, myID, numprocs, current_angle, &seed_input);
       //Phase Space File Report 
-	  MAIN_THREAD report_psf(file_name_output_num_p, psf_data, &voxel_data);
+      MAIN_THREAD report_psf(file_name_output_num_p, psf_data, &voxel_data, E);
     }
     else
     {
       // Projection 0 happens only when num_projections==1 or when flag_simulateMammoAfterDBT==true:
       MAIN_THREAD report_image(file_name_output_num_p, detector_data, source_data, mean_energy_spectrum, image, time_elapsed_MC_loop, total_histories, 0, 1, myID, numprocs, current_angle, &seed_input);
       //Phase Space File Report 
-	  MAIN_THREAD report_psf(file_name_output_num_p, psf_data, &voxel_data);
+      MAIN_THREAD report_psf(file_name_output_num_p, psf_data, &voxel_data, E);
     }
 
     // *** Clear the image after reporting, unless this is the last projection to simulate:
@@ -2704,7 +2696,6 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
 
   printf("nx = %d, ny = %d, nz = %d\n", nx, ny, nz);
 
-  exit(-1);
   if (density_vox_path[0]) {
       if (0 == load_density_cube(density_vox_path, nx, ny, nz, &h_rho)) {
 	  have_rho = true;
@@ -2715,7 +2706,9 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
 	  std::exit(1);
       }
   }
-    
+
+  printf("nx = %d, ny = %d, nz = %d\n", nx, ny, nz);
+  
   // Upload density + edges and bind constants
   float *d_xe=nullptr, *d_ye=nullptr, *d_ze=nullptr;
 
@@ -3089,10 +3082,31 @@ void load_voxels(int myID, char* file_name_voxels, float* density_max, struct vo
   }
   while(strstr(new_line,"[SECTION VOXELS")==NULL);   // Skip comments and empty lines until the header begins
 
-  new_line_ptr = gzgets(file_ptr, new_line, 250);   //  !!zlib!!   // Read full line (max. 250 characters).
-  sscanf(new_line, "%d %d %d",&voxel_data->num_voxels.x, &voxel_data->num_voxels.y, &voxel_data->num_voxels.z);
   new_line_ptr = gzgets(file_ptr, new_line, 250);   //  !!zlib!!
-  sscanf(new_line, "%f %f %f", &voxel_data->voxel_size.x, &voxel_data->voxel_size.y, &voxel_data->voxel_size.z);
+  sscanf(new_line, "%d %d %d", &voxel_data->num_voxels.x, &voxel_data->num_voxels.y, &voxel_data->num_voxels.z);
+  
+  // Read bounding box size directly (cm), instead of voxel size:
+  new_line_ptr = gzgets(file_ptr, new_line, 250);   // !!zlib!!
+  sscanf(new_line, "%f %f %f", &voxel_data->size_bbox.x, &voxel_data->size_bbox.y, &voxel_data->size_bbox.z);
+
+  // Basic validation:
+  if (voxel_data->num_voxels.x <= 0 || voxel_data->num_voxels.y <= 0 || voxel_data->num_voxels.z <= 0 ||
+      voxel_data->size_bbox.x <= 0.0f  || voxel_data->size_bbox.y <= 0.0f  || voxel_data->size_bbox.z <= 0.0f)
+  {
+    MAIN_THREAD printf("\n\n   !!Reading ERROR load_voxels!! Invalid bbox or voxel dims in header.\n");
+    MAIN_THREAD printf("      num_voxels = %d %d %d ; size_bbox(cm) = %g %g %g\n",
+		       voxel_data->num_voxels.x, voxel_data->num_voxels.y, voxel_data->num_voxels.z,
+		       voxel_data->size_bbox.x, voxel_data->size_bbox.y, voxel_data->size_bbox.z);
+    exit(-2);
+  }
+
+  // Derive a representative voxel size for legacy code paths (uniform approximation):
+  //voxel_data->voxel_size.x = voxel_data->size_bbox.x / (float)voxel_data->num_voxels.x;
+  //voxel_data->voxel_size.y = voxel_data->size_bbox.y / (float)voxel_data->num_voxels.y;
+  //voxel_data->voxel_size.z = voxel_data->size_bbox.z / (float)voxel_data->num_voxels.z;
+
+  float voxel_volume = voxel_data->size_bbox.x*voxel_data->size_bbox.y*voxel_data->size_bbox.z;
+    
   do
   {
     new_line_ptr = gzgets(file_ptr, new_line, 250);   //  !!zlib!!
@@ -3102,18 +3116,13 @@ void load_voxels(int myID, char* file_name_voxels, float* density_max, struct vo
       exit(-2);
     }
   }
-  while(strstr(new_line,"[END OF VXH SECTION")==NULL);   // Skip rest of the header
 
-  // -- Store the size of the voxel bounding box (used in the source function):
-  voxel_data->size_bbox.x = voxel_data->num_voxels.x * voxel_data->voxel_size.x;
-  voxel_data->size_bbox.y = voxel_data->num_voxels.y * voxel_data->voxel_size.y;
-  voxel_data->size_bbox.z = voxel_data->num_voxels.z * voxel_data->voxel_size.z;
+  while(strstr(new_line,"[END OF VXH SECTION")==NULL);   // Skip rest of the header
   
   MAIN_THREAD
   {
     printf("       Number of voxels in the input geometry file: %d x %d x %d =  %d\n", voxel_data->num_voxels.x, voxel_data->num_voxels.y, voxel_data->num_voxels.z, (voxel_data->num_voxels.x*voxel_data->num_voxels.y*voxel_data->num_voxels.z));
-    printf("       Size of the input voxels: %f x %f x %f cm  (voxel volume=%f cm^3)\n", voxel_data->voxel_size.x, voxel_data->voxel_size.y, voxel_data->voxel_size.z, voxel_data->voxel_size.x*voxel_data->voxel_size.y*voxel_data->voxel_size.z);
-    printf("       Voxel bounding box size:  %f x %f x %f cm\n", voxel_data->size_bbox.x, voxel_data->size_bbox.y,  voxel_data->size_bbox.z);
+    printf("       Voxel bounding box size:  %f x %f x %f cm  (bounding box volume=%f cm^3)\n", voxel_data->size_bbox.x, voxel_data->size_bbox.y, voxel_data->size_bbox.z,  voxel_volume);
     printf("       Voxel geometry offset:    %f,  %f,  %f cm\n", voxel_data->offset.x, voxel_data->offset.y, voxel_data->offset.z);            // !!DBTv1.4!!
   }
 
@@ -3136,9 +3145,9 @@ void load_voxels(int myID, char* file_name_voxels, float* density_max, struct vo
   }
   
   // -- Store the inverse of the pixel sides (in cm) to speed up the particle location in voxels.
-  voxel_data->inv_voxel_size.x = 1.0f/(voxel_data->voxel_size.x);
-  voxel_data->inv_voxel_size.y = 1.0f/(voxel_data->voxel_size.y);
-  voxel_data->inv_voxel_size.z = 1.0f/(voxel_data->voxel_size.z);
+  //voxel_data->inv_voxel_size.x = 1.0f/(voxel_data->voxel_size.x);
+  //voxel_data->inv_voxel_size.y = 1.0f/(voxel_data->voxel_size.y);
+  //voxel_data->inv_voxel_size.z = 1.0f/(voxel_data->voxel_size.z);
   
   // -- Allocate the voxel matrix and store array size:
 //   *voxel_mat_dens_bytes = sizeof(float2)*(voxel_data->num_voxels.x)*(voxel_data->num_voxels.y)*(voxel_data->num_voxels.z);
@@ -4646,108 +4655,112 @@ int report_materials_dose(int num_projections, unsigned long long int total_hist
 //!       @param[in] psf_data   psf data file structure
 //!       @param[in] voxel_data   voxel data file structure
 ////////////////////////////////////////////////////////////////////////////////
-int report_psf(char* file_name_output, struct psf_struct* psf_data, struct voxel_struct* voxel_data)
+int report_psf(const char* file_name_output,
+               struct psf_struct* psf_data,
+               const struct voxel_struct* voxel_data,
+               const EdgeVectors& E)   
 {
+  if (!psf_data || !psf_data->state) return 0;
 
- if (psf_data->state==true){
- // -- Prepare output:  
-  char file[250];
-  char file2[250];
-  unsigned long long int  i;
-  char voi;
-  
-  // for each VOI
-  for(voi=0; voi<psf_data->psf_voi; voi++)
+  char file_txt[250];
+  char file_raw[250];
+
+  // Write per-VOI raw files
+  for (int voi = 0; voi < (int)psf_data->psf_voi; voi++)
   {
-	strncpy (file, file_name_output, 250);
-	sprintf(file2, "%s_%1d", file, voi+1);
-//	strcat(file2,"_psf.txt");                       // !!txt!! 
-	strcat(file2,"_psf.raw");                       // !!BINARY!! 
-	FILE* file_ptr = fopen(file2, "w");  // !!BINARY!!
-  
-    if (file_ptr==NULL)
+    // output_<voi+1>_psf.raw
+    // snprintf guarantees NUL termination
+    snprintf(file_raw, sizeof(file_raw), "%s_%d_psf.raw", file_name_output, voi + 1);
+
+    FILE* fp = fopen(file_raw, "wb");
+    if (!fp)
     {
-      printf("\n\n   !!fopen ERROR report_image!! Binary file %s can not be opened for writing!!\n", file2);
-      exit(-3);
+      printf("\n\n   !!fopen ERROR report_psf!! Binary file %s can not be opened for writing!!\n", file_raw);
+      return -3;
     }
-  
-//    fprintf(file_ptr, "#PHASE SPACE FILE\n");
-//    fprintf(file_ptr, "#X Y Z U V W E\n");
-  
-    for(i=0; i<psf_data->psf_total[voi]; i++)
-    {
-//	  fprintf(file_ptr, "%.8lf %.8lf %.8lf %.8lf  %.8lf  %.8lf  %.8lf\n", (double)(psf_data->psfpos[i + MAXPSFHIST*voi].x), (double)(psf_data->psfpos[i + MAXPSFHIST*voi].y), (double)(psf_data->psfpos[i+ MAXPSFHIST*voi].z),
-//	          (double)(psf_data->psfdir[i+MAXPSFHIST*voi].x), (double)(psf_data->psfdir[i+MAXPSFHIST*voi].y), (double)(psf_data->psfdir[i + MAXPSFHIST*voi].z), (double)(psf_data->psfener[i + MAXPSFHIST*voi])); // psf data output
 
-	// binary
-	
-	fwrite(&psf_data->psfpos[i + MAXPSFHIST*voi].x, sizeof(float), 1, file_ptr);
-	fwrite(&psf_data->psfpos[i + MAXPSFHIST*voi].y, sizeof(float), 1, file_ptr);
-	fwrite(&psf_data->psfpos[i + MAXPSFHIST*voi].z, sizeof(float), 1, file_ptr);
-	fwrite(&psf_data->psfdir[i + MAXPSFHIST*voi].x, sizeof(float), 1, file_ptr);
-	fwrite(&psf_data->psfdir[i + MAXPSFHIST*voi].y, sizeof(float), 1, file_ptr);
-	fwrite(&psf_data->psfdir[i + MAXPSFHIST*voi].z, sizeof(float), 1, file_ptr);
-	fwrite(&psf_data->psfener[i + MAXPSFHIST*voi], sizeof(float), 1, file_ptr);
-			
-			  psf_data->psfpos[i + MAXPSFHIST*voi].x = 0; psf_data->psfpos[i + MAXPSFHIST*voi].y = 0;  psf_data->psfpos[i + MAXPSFHIST*voi].z = 0; 
-			  psf_data->psfdir[i + MAXPSFHIST*voi].x = 0; psf_data->psfdir[i + MAXPSFHIST*voi].y = 0; psf_data->psfdir[i + MAXPSFHIST*voi].z = 0;
-			  psf_data->psfener[i + MAXPSFHIST*voi] = 0; //reset counters
-			
-  }
-    //psf_data->psf_total[voi] = 0;
-    fclose(file_ptr);
-  }
-  
-  //write a summary of the results
-  
-  strncpy (file, file_name_output, 250);
-  strcat(file,"_psf.txt");                       // !!BINARY!! 
-  FILE* file_ptr = fopen(file, "w");  // !!BINARY!!
-  
-    if (file_ptr==NULL)
+    const unsigned long long base = (unsigned long long)MAXPSFHIST * (unsigned long long)voi;
+    const unsigned long long n = psf_data->psf_total[voi];
+
+    for (unsigned long long i = 0; i < n; i++)
     {
-      printf("\n\n   !!fopen ERROR report_image!! Text file %s can not be opened for writing!!\n", file);
-      exit(-3);
+      const unsigned long long idx = base + i;
+
+      fwrite(&psf_data->psfpos[idx].x, sizeof(float), 1, fp);
+      fwrite(&psf_data->psfpos[idx].y, sizeof(float), 1, fp);
+      fwrite(&psf_data->psfpos[idx].z, sizeof(float), 1, fp);
+
+      fwrite(&psf_data->psfdir[idx].x, sizeof(float), 1, fp);
+      fwrite(&psf_data->psfdir[idx].y, sizeof(float), 1, fp);
+      fwrite(&psf_data->psfdir[idx].z, sizeof(float), 1, fp);
+
+      fwrite(&psf_data->psfener[idx], sizeof(float), 1, fp);
+
+      // reset counters (optional)
+      psf_data->psfpos[idx].x = psf_data->psfpos[idx].y = psf_data->psfpos[idx].z = 0.0f;
+      psf_data->psfdir[idx].x = psf_data->psfdir[idx].y = psf_data->psfdir[idx].z = 0.0f;
+      psf_data->psfener[idx]  = 0.0f;
     }
-	
-	fprintf(file_ptr, "VOI coordinates (cm)\n");
-	fprintf(file_ptr, "X");
-	for(voi=0; voi<psf_data->psf_voi; voi++)
-	{
-		fprintf(file_ptr, " %.4lf", (psf_data->voxindex[voi].x + 1)*voxel_data->voxel_size.x -0.5*voxel_data->voxel_size.x + voxel_data->offset.x);
-	}
-		fprintf(file_ptr, "\nY");
-	for(voi=0; voi<psf_data->psf_voi; voi++)
-	{
-		fprintf(file_ptr, " %.4lf", (psf_data->voxindex[voi].y + 1)*voxel_data->voxel_size.y -0.5*voxel_data->voxel_size.y + voxel_data->offset.y);
-	}
-	
-	fprintf(file_ptr, "\nZ");
-	for(voi=0; voi<psf_data->psf_voi; voi++)
-	{
-		fprintf(file_ptr, " %.4lf", (psf_data->voxindex[voi].z + 1)*voxel_data->voxel_size.z -0.5*voxel_data->voxel_size.z + voxel_data->offset.z);
-	}
 
-    fprintf(file_ptr, "\nN");
-	for(voi=0; voi<psf_data->psf_voi; voi++)
-	{
-		fprintf(file_ptr, " %llu", psf_data->psf_total[voi]);
-        psf_data->psf_total[voi] = 0;
-	}
+    fclose(fp);
+  }
 
+  // Summary text
+  snprintf(file_txt, sizeof(file_txt), "%s_psf.txt", file_name_output);
+  FILE* ft = fopen(file_txt, "w");
+  if (!ft)
+  {
+    printf("\n\n   !!fopen ERROR report_psf!! Text file %s can not be opened for writing!!\n", file_txt);
+    return -3;
+  }
 
+  // Helper: center coordinate from edges + offset.
+  // NOTE: assumes E.*_edges_cm are in cm and indices are 0-based voxel indices.
+  auto center_x_cm = [&](int ix) -> double {
+    return 0.5 * ((double)E.x[ix] + (double)E.x[ix + 1]) + (double)voxel_data->offset.x;
+  };
+  auto center_y_cm = [&](int iy) -> double {
+    return 0.5 * ((double)E.y[iy] + (double)E.y[iy + 1]) + (double)voxel_data->offset.y;
+  };
+  auto center_z_cm = [&](int iz) -> double {
+    return 0.5 * ((double)E.z[iz] + (double)E.z[iz + 1]) + (double)voxel_data->offset.z;
+  };
 
-    
-	
-	fclose(file_ptr);
-  return (0);
- }
-  else {
-   return (0);
-   }
- }
+  fprintf(ft, "VOI coordinates (cm)\n");
 
+  fprintf(ft, "X");
+  for (int voi = 0; voi < (int)psf_data->psf_voi; voi++)
+  {
+    const int ix = (int)psf_data->voxindex[voi].x;  // assume 0-based
+    fprintf(ft, " %.4lf", center_x_cm(ix));
+  }
 
+  fprintf(ft, "\nY");
+  for (int voi = 0; voi < (int)psf_data->psf_voi; voi++)
+  {
+    const int iy = (int)psf_data->voxindex[voi].y;
+    fprintf(ft, " %.4lf", center_y_cm(iy));
+  }
+
+  fprintf(ft, "\nZ");
+  for (int voi = 0; voi < (int)psf_data->psf_voi; voi++)
+  {
+    const int iz = (int)psf_data->voxindex[voi].z;
+    fprintf(ft, " %.4lf", center_z_cm(iz));
+  }
+
+  fprintf(ft, "\nN");
+  for (int voi = 0; voi < (int)psf_data->psf_voi; voi++)
+  {
+    fprintf(ft, " %llu", (unsigned long long)psf_data->psf_total[voi]);
+    psf_data->psf_total[voi] = 0;   // reset here if desired
+  }
+
+  fprintf(ft, "\n");
+  fclose(ft);
+
+  return 0;
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 //!  Sets the tomographic acquisition trajectory: store in memory the source and detector
