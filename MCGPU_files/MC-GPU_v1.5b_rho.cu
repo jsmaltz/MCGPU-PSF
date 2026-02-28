@@ -2648,36 +2648,7 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
 
   // JSM add in density array read, start
 
-  char density_vox_path[512] = {0};  // empty = disabled
-  // Parse a line like: density_vox_file = <path>
-  // If your parser is ad-hoc, a simple sscanf+strstr works:
-  new_line_ptr = fgets_trimmed(new_line, 400, file_ptr);   
-  printf("Checking for density voxel path specification\n");
-  if (strstr(new_line, "density_vox_path") != NULL) {
-    sscanf(new_line, "density_vox_path = %511s", density_vox_path);
-    printf("Density voxel file specified as: %s\n", density_vox_path);
-  }
-
-  float* h_rho = NULL;
-  float* d_rho = NULL;
-  bool   have_rho = false;
-
-  int nx = voxel_data->num_voxels.x;
-  int ny = voxel_data->num_voxels.y;
-  int nz = voxel_data->num_voxels.z;
-
-
-  if (density_vox_path[0]) {
-      if (0 == load_density_cube(density_vox_path, nx, ny, nz, &h_rho)) {
-	  have_rho = true;
-	  printf("==> Loaded density cube: %dx%dx%d (%.2f MB)\n", nx, ny, nz,
-		 (nx*ny*1.0*nz*sizeof(float))/1024.0/1024.0);
-      } else {
-	  fprintf(stderr,"!! density cube provided but failed to load\n");
-	  std::exit(1);
-      }
-  }
-
+  
   // Build edges: try files, else synthesize uniform from your geometry
   // Replace these with your real sources:
   const char* x_edges_file = NULL;
@@ -2701,8 +2672,49 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
     printf("Voxel edge file specified as: %s\n", vox_edge_path);
   }
 
-  EdgeVectors E = build_edges(nx, ny, nz, vox_edge_path, x_edges_file, y_edges_file, z_edges_file, G);
+  int nxe = -1;
+  int nye = -1;
+  int nze = -1;
+
+  // also gets nx+1, ny+1, nz+1
+  EdgeVectors E = build_edges(nxe, nye, nze, vox_edge_path, x_edges_file, y_edges_file, z_edges_file, G);
   E_out = E;
+
+  int nx = nxe--;
+  int ny = nye--;
+  int nz = nze--;
+ 
+  voxel_data->num_voxels.x = nx;
+  voxel_data->num_voxels.y = ny;
+  voxel_data->num_voxels.x = nz;
+     
+  char density_vox_path[512] = {0};  // empty = disabled
+  // Parse a line like: density_vox_file = <path>
+  // If your parser is ad-hoc, a simple sscanf+strstr works:
+  new_line_ptr = fgets_trimmed(new_line, 400, file_ptr);   
+  printf("Checking for density voxel path specification\n");
+  if (strstr(new_line, "density_vox_path") != NULL) {
+    sscanf(new_line, "density_vox_path = %511s", density_vox_path);
+    printf("Density voxel file specified as: %s\n", density_vox_path);
+  }
+
+  float* h_rho = NULL;
+  float* d_rho = NULL;
+  bool   have_rho = false;
+
+  printf("nx = %d, ny = %d, nz = %d\n", nx, ny, nz);
+
+  exit(-1);
+  if (density_vox_path[0]) {
+      if (0 == load_density_cube(density_vox_path, nx, ny, nz, &h_rho)) {
+	  have_rho = true;
+	  printf("==> Loaded density cube: %dx%dx%d (%.2f MB)\n", nx, ny, nz,
+		 (nx*ny*1.0*nz*sizeof(float))/1024.0/1024.0);
+      } else {
+	  fprintf(stderr,"!! density cube provided but failed to load\n");
+	  std::exit(1);
+      }
+  }
     
   // Upload density + edges and bind constants
   float *d_xe=nullptr, *d_ye=nullptr, *d_ze=nullptr;
@@ -4344,7 +4356,8 @@ int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel
   fprintf(file_ptr, "#  The dose is calculated adding the energy deposited in the individual voxels within the dose ROI and dividing by the total mass of the material in the ROI.\n");
   fprintf(file_ptr, "#\n");  
   fprintf(file_ptr, "#\n");
-  fprintf(file_ptr, "#  Voxel size:  %lf x %lf x %lf = %lf cm^3\n", 1.0/(double)(voxel_data->inv_voxel_size.x), 1.0/(double)(voxel_data->inv_voxel_size.y), 1.0/(double)(voxel_data->inv_voxel_size.z), 1.0/(double)(voxel_data->inv_voxel_size.x*voxel_data->inv_voxel_size.y*voxel_data->inv_voxel_size.z));
+  //fprintf(file_ptr, "#  Voxel size:  %lf x %lf x %lf = %lf cm^3\n", 1.0/(double)(voxel_data->inv_voxel_size.x), 1.0/(double)(voxel_data->inv_voxel_size.y), 1.0/(double)(voxel_data->inv_voxel_size.z), 1.0/(double)(voxel_data->inv_voxel_size.x*voxel_data->inv_voxel_size.y*voxel_data->inv_voxel_size.z));
+  fprintf(file_ptr, "#  *** Voxel sizes determined from edge file specification");
   fprintf(file_ptr, "#  Number of voxels in the reported region of interest (ROI) X, Y and Z:\n");
   fprintf(file_ptr, "#      %d  %d  %d\n", DX, DY, DZ);
   fprintf(file_ptr, "#  Coordinates of the ROI inside the voxel volume = X[%d,%d], Y[%d,%d], Z[%d,%d]\n", dose_ROI_x_min+1, dose_ROI_x_max+1, dose_ROI_y_min+1, dose_ROI_y_max+1, dose_ROI_z_min+1, dose_ROI_z_max+1);  // Show ROI with index=1 for the first voxel instead of 0.
@@ -4380,92 +4393,110 @@ int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel
      max_voxel_dose_z[i]      = 0;       
   }
   
-  double voxel_volume = 1.0 / ( ((double)voxel_data->inv_voxel_size.x) * ((double)voxel_data->inv_voxel_size.y) * ((double)voxel_data->inv_voxel_size.z) );
-    
-  for(k=0; k<DZ; k++)
+  // Precompute for linear index mapping
+  const int nx = (int)voxel_data->num_voxels.x;
+  const int ny = (int)voxel_data->num_voxels.y;
+  const int nz = (int)voxel_data->num_voxels.z;
+  const long long nxy = (long long)nx * (long long)ny;
+
+  for (k = 0; k < DZ; k++)
   {
-    for(j=0; j<DY; j++)
+    const int kz = k + dose_ROI_z_min;
+    const double dz_cm = (double)E.z[kz + 1] - (double)E.z[kz];
+
+    for (j = 0; j < DY; j++)
     {
-      for(i=0; i<DX; i++)
+      const int jy = j + dose_ROI_y_min;
+      const double dy_cm = (double)E.y[jy + 1] - (double)E.y[jy];
+
+      for (i = 0; i < DX; i++)
       {
-        register int voxel_geometry = (i+dose_ROI_x_min) + (j+dose_ROI_y_min)*voxel_data->num_voxels.x + (k+dose_ROI_z_min)*voxel_data->num_voxels.x*voxel_data->num_voxels.y;
-//         register double inv_voxel_mass = 1.0 / (voxel_mat_dens[voxel_geometry].y*voxel_volume);
-//         register int mat_number = (int)(voxel_mat_dens[voxel_geometry].x) - 1 ;  // Material number, starting at 0.
-//         mat_mass_ROI[mat_number]  += voxel_mat_dens[voxel_geometry].y*voxel_volume;   // Estimate mass and energy deposited in this material
-        
-        register double inv_voxel_mass = 1.0 / (density_LUT[(int)voxel_mat_dens[voxel_geometry]]*voxel_volume);       //!!FixedDensity_DBT!! Density taken from function "density_LOT"
-        register int mat_number = (int)(voxel_mat_dens[voxel_geometry]);  // Material number, starting at 0.      //!!FixedDensity_DBT!!
-        mat_mass_ROI[mat_number]  += density_LUT[(int)voxel_mat_dens[voxel_geometry]]*voxel_volume;   // Estimate mass and energy deposited in this material    //!!FixedDensity_DBT!! Density taken from function "density_LOT"
-        
+	const int ix = i + dose_ROI_x_min;
+	const double dx_cm = (double)E.x[ix + 1] - (double)E.x[ix];
 
-        mat_Edep[mat_number]  += (double)voxels_Edep[voxel].x;        // Using doubles to avoid overflow
-        mat_Edep2[mat_number] += (double)voxels_Edep[voxel].y;
-        mat_voxels[mat_number]++;                                                // Count voxels made of this material
-        
-                
-              // Optional code to eliminate dose deposited in air (first material).  Sometimes useful for visualization (dose to air irrelevant, noisy)
-              //   if (voxel_mat_dens[voxel_geometry].x < 1.1f)
-              //   {
-              //     voxels_Edep[voxel].x = 0.0f;
-              //     voxels_Edep[voxel].y = 0.0f;
-              //   }
-                
-        // -- Convert total energy deposited to dose [eV/gram] per history:                        
-        
-//  !!DeBuG!! BUG in first version MC-GPU v1.3, corrected for v1.4 [2013-01-31]. Edep2 is NOT scaled by SCALE_eV!! Also, division by voxel_mass must be done at the end!
-//  !!DeBuG!!   Wrong:  voxel_dose = ((double)voxels_Edep[voxel].x) * inv_N * inv_voxel_mass * inv_SCALE_eV;
-//  !!DeBuG!!   Wrong:  register double voxel_std_dev = (((double)voxels_Edep[voxel].y) * inv_N * inv_SCALE_eV * inv_voxel_mass - voxel_dose*voxel_dose) * inv_N;
+	const double voxel_volume = dx_cm * dy_cm * dz_cm;  // cm^3
 
-        voxel_dose = ((double)voxels_Edep[voxel].x) * inv_N * inv_SCALE_eV;    // [<Edep> == Edep / N_hist /scaling_factor ;  dose == <Edep> / mass]
-        total_energy_deposited += voxels_Edep[voxel].x;
-               
-        register double voxel_std_dev = (((double)voxels_Edep[voxel].y) * inv_N - voxel_dose*voxel_dose) * inv_N * inv_voxel_mass;   // [sigma_Edep^2 = (<Edep^2> - <Edep>^2) / N_hist] ; [sigma_dose^2 = sigma_Edep/mass] (not using SCALE_eV for std_dev to prevent overflow)  
+	// Linear index in the full voxel grid (x fastest)
+	const long long voxel_geometry =
+	    (long long)ix + (long long)jy * nx + (long long)kz * nxy;
 
-        if (voxel_std_dev>0.0)
-          voxel_std_dev = sqrt(voxel_std_dev);
-        
-        voxel_dose *= inv_voxel_mass;    // [dose == <Edep> / mass]
-        
-        if (voxel_dose > max_voxel_dose[mat_number])    // Tally peak dose for each material!
-        {
-          // Find the voxel that has the maximum dose:
-          max_voxel_dose[mat_number]          = voxel_dose;
-          max_voxel_dose_std_dev[mat_number]  = voxel_std_dev;
-          max_voxel_dose_x[mat_number]        = i+dose_ROI_x_min;
-          max_voxel_dose_y[mat_number]        = j+dose_ROI_y_min;
-          max_voxel_dose_z[mat_number]        = k+dose_ROI_z_min;
-          if (voxel_dose > max_voxel_dose_all_mat)
-          {
-            max_voxel_dose_all_mat = voxel_dose;
-            max_voxel_dose_std_dev_all_mat = voxel_std_dev;
-          }
-        }
-        
-        // Report only one dose plane in ASCII:
-        if (k == z_plane_dose_ROI) 
-          fprintf(file_ptr, "%.6lf %.6lf\n", voxel_dose, 2.0*voxel_std_dev);        
-        
-        float voxel_dose_float  = (float)voxel_dose;         // After dividing by the number of histories I can report FLOAT bc the number of significant digits will be low.  
-        
-        fwrite(&voxel_dose_float,  sizeof(float), 1, file_binary_mean_ptr);    // Write dose data in a binary file that can be easyly open in imageJ.   !!BINARY!!
+	// Material number starting at 0 (FixedDensity_DBT path)
+	const int mat_number = (int)voxel_mat_dens[voxel_geometry];
 
-       
-        // !!DeBuG!! OLD version, reporting sigma: float voxel_sigma_float = 2.0f * (float)(voxel_std_dev);  fwrite(&voxel_sigma_float, sizeof(float), 1, file_binary_sigma_ptr);
-        float voxel_relErr_float = 0.0f;
-        if (voxel_dose > 0.0)
-          voxel_relErr_float = 200.0f*(float)(voxel_std_dev/voxel_dose);        //  New in MC-GPU v1.4: Report relative error for 2*sigma, in %  (avoid dividing by 0)
-        fwrite(&voxel_relErr_float, sizeof(float), 1, file_binary_sigma_ptr);
-        
-        
-        voxel++;
+	// Guard (optional)
+	if (mat_number < 0 || mat_number >= MAX_MATERIALS) {
+	  fprintf(stderr, "ERROR: mat out of range at (ix,iy,iz)=(%d,%d,%d) llk=%lld mat=%d\n",
+		  ix, jy, kz, voxel_geometry, mat_number);
+	  exit(-1);
+	}
+
+	// Mass = density * volume (g), using your LUT (g/cm^3)
+	const double voxel_mass = ((double)density_LUT[mat_number]) * voxel_volume;
+	const double inv_voxel_mass = 1.0 / voxel_mass;
+
+	// ROI material mass tally
+	mat_mass_ROI[mat_number] += voxel_mass;
+
+	// Edep tallies per material (doubles to avoid overflow)
+	mat_Edep[mat_number]  += (double)voxels_Edep[voxel].x;
+	mat_Edep2[mat_number] += (double)voxels_Edep[voxel].y;
+	mat_voxels[mat_number]++;
+
+	// Convert total energy deposited to dose [eV/gram] per history:
+	voxel_dose = ((double)voxels_Edep[voxel].x) * inv_N * inv_SCALE_eV;
+	total_energy_deposited += voxels_Edep[voxel].x;
+
+	// Std dev propagation: sigma^2(dose) = sigma^2(Edep)/mass^2
+	// Using your existing convention (avoid SCALE_eV in std dev)
+	register double voxel_std_dev =
+	    (((double)voxels_Edep[voxel].y) * inv_N - voxel_dose * voxel_dose) * inv_N * inv_voxel_mass;
+
+	if (voxel_std_dev > 0.0)
+	  voxel_std_dev = sqrt(voxel_std_dev);
+	else
+	  voxel_std_dev = 0.0;
+
+	voxel_dose *= inv_voxel_mass;
+
+	// Peak dose per material
+	if (voxel_dose > max_voxel_dose[mat_number])
+	{
+	  max_voxel_dose[mat_number]         = voxel_dose;
+	  max_voxel_dose_std_dev[mat_number] = voxel_std_dev;
+	  max_voxel_dose_x[mat_number]       = ix;
+	  max_voxel_dose_y[mat_number]       = jy;
+	  max_voxel_dose_z[mat_number]       = kz;
+
+	  if (voxel_dose > max_voxel_dose_all_mat)
+	  {
+	    max_voxel_dose_all_mat         = voxel_dose;
+	    max_voxel_dose_std_dev_all_mat = voxel_std_dev;
+	  }
+	}
+
+	// Report only one dose plane in ASCII:
+	if (k == z_plane_dose_ROI)
+	  fprintf(file_ptr, "%.6lf %.6lf\n", voxel_dose, 2.0 * voxel_std_dev);
+
+	// Binary mean + rel error
+	float voxel_dose_float = (float)voxel_dose;
+	fwrite(&voxel_dose_float, sizeof(float), 1, file_binary_mean_ptr);
+
+	float voxel_relErr_float = 0.0f;
+	if (voxel_dose > 0.0)
+	  voxel_relErr_float = 200.0f * (float)(voxel_std_dev / voxel_dose);
+	fwrite(&voxel_relErr_float, sizeof(float), 1, file_binary_sigma_ptr);
+
+	voxel++;
       }
-      if (k == z_plane_dose_ROI) 
-        fprintf(file_ptr, "\n");     // Separate Ys with an empty line for visualization with gnuplot.
-    }
-    if (k == z_plane_dose_ROI) 
-      fprintf(file_ptr, "\n");     // Separate Zs.
-  }
 
+      if (k == z_plane_dose_ROI)
+	fprintf(file_ptr, "\n");
+    }
+
+    if (k == z_plane_dose_ROI)
+      fprintf(file_ptr, "\n");
+  }
   
   fprintf(file_ptr, "#   ****** DOSE REPORT: TOTAL SIMULATION PERFORMANCE FOR ALL PROJECTIONS ******\n");
   fprintf(file_ptr, "#       Total number of simulated x rays: %lld\n", total_histories*((unsigned long long int)num_projections));
