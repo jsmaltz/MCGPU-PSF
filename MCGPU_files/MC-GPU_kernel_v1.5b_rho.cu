@@ -124,7 +124,6 @@ __device__ __forceinline__ int lower_bound_edges_gp(float x, int n, const float*
         else lo = mid;
     }
     // clamp to valid voxel index
-    if (lo < 0) lo = 0;
     if (lo > n-1) lo = n-1;
     return lo;
 }
@@ -1149,8 +1148,7 @@ inline unsigned int locate_voxel_non_uniform(const GridParams* gp,
     const float* __restrict__ ye = gp->y_edges;
     const float* __restrict__ ze = gp->z_edges;
 
-    // Half-open bounds: [min, max). Points exactly at max are treated as outside.
-    // This avoids ambiguity at the far boundary and prevents ix==nx.
+    // Half-open bounds: [min, max)
     if (p_world.x < xe[0] || p_world.x >= xe[nx] ||
         p_world.y < ye[0] || p_world.y >= ye[ny] ||
         p_world.z < ze[0] || p_world.z >= ze[nz])
@@ -1158,16 +1156,22 @@ inline unsigned int locate_voxel_non_uniform(const GridParams* gp,
         return FLAG_OUTSIDE_VOXELS;
     }
 
-    const int ix = lower_bound_edges_gp(p_world.x, nx, xe);
-    const int iy = lower_bound_edges_gp(p_world.y, ny, ye);
-    const int iz = lower_bound_edges_gp(p_world.z, nz, ze);
+    int ix = lower_bound_edges_gp(p_world.x, nx, xe);
+    int iy = lower_bound_edges_gp(p_world.y, ny, ye);
+    int iz = lower_bound_edges_gp(p_world.z, nz, ze);
+
+    // Clamp defensively (protects against helper off-by-one / fp edge cases)
+    if ((unsigned)ix >= (unsigned)nx) ix = nx - 1;
+    if ((unsigned)iy >= (unsigned)ny) iy = ny - 1;
+    if ((unsigned)iz >= (unsigned)nz) iz = nz - 1;
 
     voxel_coord->x = (short)ix;
     voxel_coord->y = (short)iy;
     voxel_coord->z = (short)iz;
 
     // X-fastest linearization
-    return (unsigned int)(ix + nx * (iy + (unsigned int)ny * iz));
+    const size_t idx = (size_t)ix + (size_t)nx * ((size_t)iy + (size_t)ny * (size_t)iz);
+    return (unsigned int)idx;
 }
 
 __device__ __forceinline__ int nx_dev();
@@ -2257,6 +2261,7 @@ int find_material_bitree(const float3* position, char* bitree, const int bitree_
 //!  @param[in] particle initial step
 //!  @return  if the path intercepts a voxel
 ////////////////////////////////////////////////////////////////////////////////
+/*
 #ifdef USING_CUDA
 __device__
 #endif
@@ -2411,6 +2416,7 @@ inline float voxel_intercept(short3* voxel_coord, const float3* position, const 
    }
   
 }
+*/
 
 // Returns parametric distance 't' to the *nearest* face of voxel (ix,iy,iz).
 // position: ray origin, direction: normalized or not (t scales accordingly)
@@ -2577,20 +2583,44 @@ inline int pick_face_axis_nonuniform(const short3* v, const float3* p, const flo
 __device__ __forceinline__
 #endif
 float fetch_density(const float* __restrict__ d_rho, bool have_rho,
-		    int ix, int iy, int iz, int nx, int ny, int nz,
-		    int material_id) {
-    if (have_rho) {
-	// flat index: X-fastest, then Y, then Z
-	size_t idx = (size_t)ix + (size_t)nx*((size_t)iy + (size_t)ny*(size_t)iz);
-	// Use read-only cache if available
-#if __CUDA_ARCH__ >= 350
-	return __ldg(&d_rho[idx]);
+                    int ix, int iy, int iz, int nx, int ny, int nz,
+                    int material_id)
+{
+    // Fallback density (material LUT)
+    const float rho_fallback = density_LUT_CONST[material_id];
+
+    // Must have valid pointer and flag
+    if (!have_rho || d_rho == nullptr)
+        return rho_fallback;
+
+    // Bounds check (unsigned handles negatives too)
+    if ((unsigned)ix >= (unsigned)nx ||
+        (unsigned)iy >= (unsigned)ny ||
+        (unsigned)iz >= (unsigned)nz)
+        return rho_fallback;
+
+    // flat index: X-fastest, then Y, then Z
+    const size_t idx = (size_t)ix + (size_t)nx * ((size_t)iy + (size_t)ny * (size_t)iz);
+
+    float rho;
+#if defined(USING_CUDA) && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 350)
+    rho = __ldg(&d_rho[idx]);
 #else
-	return d_rho[idx];
+    rho = d_rho[idx];
 #endif
-    } else {
-	return density_LUT_CONST[material_id];
-    }
+
+    // Sanitize (avoid NaN, Inf, <=0)
+#ifdef USING_CUDA
+#if defined(__CUDA_ARCH__)
+    if (!(rho > 0.0f) || !isfinite(rho)) return rho_fallback;
+#else
+    if (!(rho > 0.0f) || !std::isfinite(rho)) return rho_fallback;
+#endif
+#else
+    if (!(rho > 0.0f) || !std::isfinite(rho)) return rho_fallback;
+#endif
+
+    return rho;
 }
 
 // Put this in a .cu compiled by nvcc (e.g., MC-GPU_kernel_v1.5b_rho.cu)

@@ -10,7 +10,6 @@
 //     -- Added electronic noise and Swank factor for detected charges output
 //     -- Anti-scatter grid based on Day and Dance, Phys Med Biol 28, pp. 1429-1433 (1983)
 
-
 // !!DBTv1.4!!    
 //     -- Improved detector model with input thickness, attenuation, fluorescence escape.
 //     -- User-defined rotation axis for the tomography scan
@@ -566,7 +565,9 @@ int main(int argc, char **argv)
 
   // *** Read the input file given in the command line and return the significant data:
   EdgeVectors E;  // will be filled by read_input
-  read_input(argc, argv, myID, &total_histories, &seed_input, &gpu_id, &num_threads_per_block, &histories_per_thread, detector_data, &image, &image_bytes, source_data, &source_energy_data, &voxel_data, file_name_voxels, file_name_materials, file_name_output, file_name_espc, &num_projections, &voxels_Edep, &voxels_Edep_bytes, file_dose_output, &dose_ROI_x_min, &dose_ROI_x_max, &dose_ROI_y_min, &dose_ROI_y_max, &dose_ROI_z_min, &dose_ROI_z_max, &SRotAxisD, &translation_helical, &flag_material_dose, &flag_simulateMammoAfterDBT, &flag_detectorFixed, psf_data, E);
+  float* h_rho = NULL;
+  
+  read_input(argc, argv, myID, &total_histories, &seed_input, &gpu_id, &num_threads_per_block, &histories_per_thread, detector_data, &image, &image_bytes, source_data, &source_energy_data, &voxel_data, file_name_voxels, file_name_materials, file_name_output, file_name_espc, &num_projections, &voxels_Edep, &voxels_Edep_bytes, file_dose_output, &dose_ROI_x_min, &dose_ROI_x_max, &dose_ROI_y_min, &dose_ROI_y_max, &dose_ROI_z_min, &dose_ROI_z_max, &SRotAxisD, &translation_helical, &flag_material_dose, &flag_simulateMammoAfterDBT, &flag_detectorFixed, psf_data, E, &h_rho);
 
   // *** Read the energy spectrum and initialize its sampling with the Walker aliasing method:
   MAIN_THREAD printf("    -- Reading the energy spectrum and initializing the Walker aliasing sampling algorithm.\n");
@@ -586,10 +587,12 @@ int main(int argc, char **argv)
         
         double phi0   = ((double)source_data[0].D_phi)*RAD2DEG;
         double theta0 = 2.0*(90.0 - acos(((double)source_data[0].cos_theta_low))*RAD2DEG);
-        if (source_data[0].flag_halfConeX)
+
+	
+        if (source_data[0].flag_halfConeX) {
           theta0 = 0.5*theta0;
           printf("      NOTE: sampling only upper half of collimated cone beam, with beam offset to edge of the image (eg, mammo).\n");   // !!DBT!!  !!HalfBeam!! !!DBTv1.4!!
-        
+        }
         printf("      azimuthal (phi), polar apertures = %.6f , %.6f degrees\n", phi0, theta0);        
         printf("              (max_height_at_y1cm = %f , max_width_at_y1cm = %f)\n", source_data[0].max_height_at_y1cm, source_data[0].max_width_at_y1cm);     // !!DBTv1.4!!  !!DeBuG!!
         
@@ -697,31 +700,53 @@ int main(int argc, char **argv)
 
 
     // *** Read the voxel data and allocate the density map matrix. Return the maximum density:
-    
+
     //-- Read ASCII format geometry: geometric parameters will be read from the header file     !!DBTv1.4!! 
     load_voxels(myID, file_name_voxels, density_max, &voxel_data, &voxel_mat_dens, &voxel_mat_dens_bytes, &dose_ROI_x_max, &dose_ROI_y_max, &dose_ROI_z_max);
    
     // -- Pre-compute the total mass of each material present in the voxel phantom
     //    (to be used in "report_materials_dose"):
-    
-    for (kk = 0; kk < MAX_MATERIALS; kk++)
+
+    // mass_materials: double[MAX_MATERIALS]
+    // voxel_mat_dens: per-voxel material id (0..MAX_MATERIALS-1), length nvox
+    // h_rho: per-voxel density (g/cm^3), length nvox, x-fastest ordering
+    // E: EdgeVectors with E.x size nx+1 etc.
+
+    for (int kk = 0; kk < MAX_MATERIALS; kk++)
       mass_materials[kk] = 0.0;
 
     const int nx = (int)voxel_data.num_voxels.x;
     const int ny = (int)voxel_data.num_voxels.y;
     const int nz = (int)voxel_data.num_voxels.z;
-    
+
     printf("nx = %d, ny = %d, nz = %d\n", nx, ny, nz);
 
-    // Sanity (optional but recommended)
+    // Sanity: edge vectors match dims
     if ((int)E.x.size() != nx + 1 || (int)E.y.size() != ny + 1 || (int)E.z.size() != nz + 1) {
       printf("ERROR: edge vector lengths mismatch: x=%d (need %d), y=%d (need %d), z=%d (need %d)\n",
 	     (int)E.x.size(), nx+1, (int)E.y.size(), ny+1, (int)E.z.size(), nz+1);
       exit(-1);
     }
 
-    const long long nxy = (long long)nx * (long long)ny;
+    const long long nxy  = (long long)nx * (long long)ny;
     const long long nvox = nxy * (long long)nz;
+
+    if (h_rho == NULL) {
+      printf("WARNING: h_rho is NULL -> using density_LUT[mat] for mass.\n");
+    } else {
+      printf("Using per-voxel density h_rho for mass.\n");
+    }
+
+    // Optional: quick density sanity (min/max) if h_rho present
+    if (h_rho) {
+      float rmin = h_rho[0], rmax = h_rho[0];
+      for (long long llk = 1; llk < nvox; ++llk) {
+	float v = h_rho[llk];
+	if (v < rmin) rmin = v;
+	if (v > rmax) rmax = v;
+      }
+      printf("h_rho stats (assumed g/cm^3): min=%.6f max=%.6f\n", rmin, rmax);
+    }
 
     for (long long llk = 0; llk < nvox; llk++)  // For each voxel in the geometry
     {
@@ -736,19 +761,30 @@ int main(int argc, char **argv)
       const double dz = (double)E.z[k + 1] - (double)E.z[k];
       const double voxel_volume = dx * dy * dz;
 
-      // Material index (0-based in your current "FixedDensity_DBT" path)
+      // Material index (0-based)
       const int mat = (int)voxel_mat_dens[llk];
 
       if (mat < 0 || mat >= MAX_MATERIALS) {
-	// Guard against corrupted voxel IDs
-	// (or continue; depends on how strict you want to be)
 	printf("ERROR: voxel material out of range at llk=%lld -> mat=%d\n", llk, mat);
 	exit(-1);
       }
 
-      // Add material mass = density * volume
-      // (density_LUT indexed by 0-based material; units g/cm^3 -> mass in g)
-      mass_materials[mat] += ((double)density_LUT[mat]) * voxel_volume;
+      // Use per-voxel rho when available; else fallback to LUT
+      double rho_g_cm3;
+      if (h_rho) {
+	rho_g_cm3 = (double)h_rho[llk];
+
+	// Optional strict checks (helpful if your cube got mis-read)
+	if (!(rho_g_cm3 > 0.0) || !std::isfinite(rho_g_cm3)) {
+	  printf("ERROR: invalid rho at llk=%lld: rho=%g\n", llk, rho_g_cm3);
+	  exit(-1);
+	}
+      } else {
+	rho_g_cm3 = (double)density_LUT[mat];
+      }
+
+      // Add material mass = density * volume  -> grams (if rho in g/cm^3 and volume in cm^3)
+      mass_materials[mat] += rho_g_cm3 * voxel_volume;
     }
     
     // ** Create the low resolution version of the phantom and the binary tree structures, if requested in the input file and dose dep tally disabled:   //!!bitree!! v1.5b
@@ -1167,7 +1203,16 @@ int main(int argc, char **argv)
     // *** Execute the x-ray transport kernel in the GPU ***
 
     if (!g_d_gp) { printf("FATAL: g_d_gp is null at kernel launch\n"); exit(1); }
-    
+
+    printf("detector_data[0].rot_inv = \n");
+    for (int ii = 0; ii < 3; ii++) {
+          for (int jj = 0; jj < 3; jj++) {
+	    int ind = ii*3+jj;
+	    printf("%f ", detector_data[0].rot_inv[ind]);
+	  }
+	  printf("\n");
+    }
+  
     track_particles<<<blocks,threads>>>(histories_per_thread, (short int)num_p, seed_input_device, image_device, voxels_Edep_device, voxel_mat_dens_device, bitree_device, mfp_Woodcock_table_device, mfp_table_a_device, mfp_table_b_device, rayleigh_table_device, compton_table_device, detector_data_device, source_data_device, materials_dose_device, psf_data_device, g_d_gp);
     
 
@@ -1261,6 +1306,7 @@ int main(int argc, char **argv)
     dose_ROI_z_min_CONST = dose_ROI_z_min;
     dose_ROI_z_max_CONST = dose_ROI_z_max;
 
+    MARK
     int CPU_batch;
     for(CPU_batch=0; CPU_batch<total_threads; CPU_batch++)
     {
@@ -1902,24 +1948,46 @@ static void upload_grid_to_device(
  }
 
 // start JSM density mods
-int load_density_cube(const char* path,
-                      int nx, int ny, int nz,
-                      float** rho_out) {
-    const size_t nvox = (size_t)nx*ny*nz;
+#include <cmath>   // std::isfinite
+#include <limits>
+
+int load_density_cube(const char* path, int nx, int ny, int nz, float** rho_out)
+{
+    if (!rho_out) {
+        fprintf(stderr,"density: rho_out is NULL\n");
+        return -1;
+    }
+    *rho_out = NULL;
+
+    if (nx <= 0 || ny <= 0 || nz <= 0) {
+        fprintf(stderr,"density: invalid dims %d %d %d\n", nx, ny, nz);
+        return -1;
+    }
+
+    // overflow-safe nvox
+    const size_t sx = (size_t)nx, sy = (size_t)ny, sz = (size_t)nz;
+    if (sx > SIZE_MAX / sy || (sx*sy) > SIZE_MAX / sz) {
+        fprintf(stderr,"density: nvox overflow for dims %d %d %d\n", nx, ny, nz);
+        return -1;
+    }
+    const size_t nvox = sx*sy*sz;
+
     float* rho = (float*)malloc(nvox*sizeof(float));
     if (!rho) { fprintf(stderr,"density: malloc failed\n"); return -1; }
 
     size_t nread = 0;
+
     if (ends_with(path, ".gz")) {
         gzFile f = gzopen(path, "rb");
         if (!f) { fprintf(stderr,"density: cannot open %s\n", path); free(rho); return -1; }
-        // Read exactly nvox float32 LE
+
         size_t need = nvox*sizeof(float);
-        char* p = (char*)rho;
+        unsigned char* p = (unsigned char*)rho;
         while (need > 0) {
-            int got = gzread(f, p, (unsigned int) (need > INT_MAX ? INT_MAX : need));
+            unsigned int chunk = (unsigned int)((need > (size_t)INT_MAX) ? (size_t)INT_MAX : need);
+            int got = gzread(f, p, chunk);
             if (got <= 0) { gzclose(f); free(rho); fprintf(stderr,"density: short read\n"); return -1; }
-            p += got; need -= got; nread += got;
+            p += got; need -= (size_t)got; nread += (size_t)got;
         }
         gzclose(f);
     } else {
@@ -1927,21 +1995,31 @@ int load_density_cube(const char* path,
         if (!f) { fprintf(stderr,"density: cannot open %s\n", path); free(rho); return -1; }
         nread = fread(rho, 1, nvox*sizeof(float), f);
         fclose(f);
-        if (nread != nvox*sizeof(float)) { free(rho); fprintf(stderr,"density: short read (%zu vs %zu)\n", nread, nvox*sizeof(float)); return -1; }
-    }
-
-    // Optional: sanity check densities
-    for (size_t i=0;i<nvox;i++){
-        if (!(rho[i] > 0.0f) || !(rho[i] < 10.0f)) { // 0<rho<10 g/cc is sane for tissue/metals
-            fprintf(stderr,"density: out-of-range at idx %zu: %g\n", i, rho[i]);
-            free(rho); return -1;
+        if (nread != nvox*sizeof(float)) {
+            free(rho);
+            fprintf(stderr,"density: short read (%zu vs %zu)\n", nread, nvox*sizeof(float));
+            return -1;
         }
     }
+
+    // Sanity: min/max + range checks (more permissive)
+    float rmin = rho[0], rmax = rho[0];
+    for (size_t i = 0; i < nvox; i++) {
+        float v = rho[i];
+        if (!std::isfinite(v) || v < 0.0f || v > 30.0f) {
+            fprintf(stderr,"density: out-of-range at idx %zu: %g\n", i, (double)v);
+            free(rho);
+            return -1;
+        }
+        if (v < rmin) rmin = v;
+        if (v > rmax) rmax = v;
+    }
+    printf("density: read %zu bytes, rho min=%.6f max=%.6f (g/cm^3 assumed)\n",
+           nread, (double)rmin, (double)rmax);
 
     *rho_out = rho;
     return 0;
 }
-
 // end JSM density mods
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1964,9 +2042,11 @@ int load_density_cube(const char* path,
 //!       @param[out] file_name_materials
 //!       @param[out] file_name_output
 ////////////////////////////////////////////////////////////////////////////////
-void read_input(int argc, char** argv, int myID, unsigned long long int* total_histories, int* seed_input, int* gpu_id, int* num_threads_per_block, int* histories_per_thread, struct detector_struct* detector_data, unsigned long long int** image_ptr, int* image_bytes, struct source_struct* source_data, struct source_energy_struct* source_energy_data, struct voxel_struct* voxel_data, char* file_name_voxels, char file_name_materials[MAX_MATERIALS][250] , char* file_name_output, char* file_name_espc, int* num_projections, ulonglong2** voxels_Edep_ptr, int* voxels_Edep_bytes, char* file_dose_output, short int* dose_ROI_x_min, short int* dose_ROI_x_max, short int* dose_ROI_y_min, short int* dose_ROI_y_max, short int* dose_ROI_z_min, short int* dose_ROI_z_max, double* SRotAxisD, double* translation_helical, int* flag_material_dose, bool* flag_simulateMammoAfterDBT, bool* flag_detectorFixed, struct psf_struct* psf_data, EdgeVectors& E_out) 
+void read_input(int argc, char** argv, int myID, unsigned long long int* total_histories, int* seed_input, int* gpu_id, int* num_threads_per_block, int* histories_per_thread, struct detector_struct* detector_data, unsigned long long int** image_ptr, int* image_bytes, struct source_struct* source_data, struct source_energy_struct* source_energy_data, struct voxel_struct* voxel_data, char* file_name_voxels, char file_name_materials[MAX_MATERIALS][250] , char* file_name_output, char* file_name_espc, int* num_projections, ulonglong2** voxels_Edep_ptr, int* voxels_Edep_bytes, char* file_dose_output, short int* dose_ROI_x_min, short int* dose_ROI_x_max, short int* dose_ROI_y_min, short int* dose_ROI_y_max, short int* dose_ROI_z_min, short int* dose_ROI_z_max, double* SRotAxisD, double* translation_helical, int* flag_material_dose, bool* flag_simulateMammoAfterDBT, bool* flag_detectorFixed, struct psf_struct* psf_data, EdgeVectors& E_out,  float** h_rho_out) 
 {
 
+  if (h_rho_out) *h_rho_out = NULL;
+  
   E_out = EdgeVectors{};
   FILE* file_ptr = NULL;
   char new_line[400];
@@ -2147,6 +2227,7 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
   source_data[0].rotation_blur = fabsf(source_data[0].rotation_blur*DEG2RAD);
   
   new_line_ptr = fgets_trimmed(new_line, 400, file_ptr);    // COLLIMATE BEAM TOWARDS POSITIVE X ANGLES ONLY? (ie, cone-beam center aligned with chest wall in mammography) [YES/NO]
+  //printf("*** line with half col-X *** %s\n", new_line);
   if (0==strncmp("YE",new_line,2) || 0==strncmp("Ye",new_line,2) || 0==strncmp("ye",new_line,2))
     source_data[0].flag_halfConeX = true;
     // MAIN_THREAD printf("       \'flag_halfConeX = true\': sampling only upper half beam for mammo geometry; beam centered at image edge.\n");   // !!DBT!!  !!HalfBeam!! !!DBTv1.4!!
@@ -2160,7 +2241,8 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
     #endif
     exit(-2);
   }
-  
+
+  //printf("***  source_data[0].flag_halfConeX = %d ***\n",  source_data[0].flag_halfConeX);
 
   /////////////////////////////////////////////////////////////////////////////
 
@@ -2699,24 +2781,47 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
   if (density_vox_path[0]) {
       if (0 == load_density_cube(density_vox_path, nx, ny, nz, &h_rho)) {
 	  have_rho = true;
-	  printf("==> Loaded density cube: %dx%dx%d (%.2f MB)\n", nx, ny, nz,
-		 (nx*ny*1.0*nz*sizeof(float))/1024.0/1024.0);
+
+	  size_t nvox = (size_t)nx * ny * nz;
+	  double memMB = (nvox * sizeof(float)) / 1024.0 / 1024.0;
+
+	  printf("==> Loaded density cube: %dx%dx%d (%.2f MB)\n",
+		 nx, ny, nz, memMB);
+
+	  if (h_rho_out)
+            *h_rho_out = h_rho;
+	  
+	  // ---- DEBUG: min / max rho ----
+	  if (h_rho && nvox > 0) {
+	      float rho_min = h_rho[0];
+	      float rho_max = h_rho[0];
+
+	      for (size_t i = 1; i < nvox; ++i) {
+		  float v = h_rho[i];
+		  if (v < rho_min) rho_min = v;
+		  if (v > rho_max) rho_max = v;
+	      }
+
+	      printf("==> Density stats (g/cm^3 assumed): "
+		     "min = %.6f, max = %.6f\n",
+		     rho_min, rho_max);
+	  }
+	  // ------------------------------
+
       } else {
 	  fprintf(stderr,"!! density cube provided but failed to load\n");
 	  std::exit(1);
       }
   }
-
-  printf("nx = %d, ny = %d, nz = %d\n", nx, ny, nz);
   
   // Upload density + edges and bind constants
   float *d_xe=nullptr, *d_ye=nullptr, *d_ze=nullptr;
 
   printf("Uploading to device \n");
   upload_grid_to_device(nx, ny, nz, E, h_rho, have_rho, d_rho, d_xe, d_ye, d_ze, g_d_gp);
-  printf("Uploaded to device, returned g_d_gp=%p \n", (void*)g_d_gp);
-
-  debug_gridparams_on_device(g_d_gp, /*print_all_if_small=*/1);
+  //printf("Uploaded to device, returned g_d_gp=%p \n", (void*)g_d_gp);
+  // check that we transferred everything okay:
+  //debug_gridparams_on_device(g_d_gp, /*print_all_if_small=*/1);
 
   
   // JSM add in density array read, end
@@ -3047,7 +3152,6 @@ char* fgets_trimmed(char* trimmed_line, int num, FILE* file_ptr)
 //!       @param[out] voxel_mat_dens_ptr   Pointer to the vector with the voxel materials and densities.
 //!       @param[in] dose_ROI_x/y/z_max   Size of the dose ROI: can not be larger than the total number of voxels in the geometry.
 ////////////////////////////////////////////////////////////////////////////////
-// void load_voxels(int myID, char* file_name_voxels, float* density_max, struct voxel_struct* voxel_data, float2** voxel_mat_dens_ptr, unsigned int* voxel_mat_dens_bytes, short int* dose_ROI_x_max, short int* dose_ROI_y_max, short int* dose_ROI_z_max)
 void load_voxels(int myID, char* file_name_voxels, float* density_max, struct voxel_struct* voxel_data, int** voxel_mat_dens_ptr, long long int* voxel_mat_dens_bytes, short int* dose_ROI_x_max, short int* dose_ROI_y_max, short int* dose_ROI_z_max)    //!!FixedDensity_DBT!! Allocating "voxel_mat_dens" as "char" instead of "float2"
 {
   char new_line[250];
@@ -3105,7 +3209,7 @@ void load_voxels(int myID, char* file_name_voxels, float* density_max, struct vo
   //voxel_data->voxel_size.y = voxel_data->size_bbox.y / (float)voxel_data->num_voxels.y;
   //voxel_data->voxel_size.z = voxel_data->size_bbox.z / (float)voxel_data->num_voxels.z;
 
-  float voxel_volume = voxel_data->size_bbox.x*voxel_data->size_bbox.y*voxel_data->size_bbox.z;
+  float bbox_volume = voxel_data->size_bbox.x*voxel_data->size_bbox.y*voxel_data->size_bbox.z;
     
   do
   {
@@ -3122,7 +3226,7 @@ void load_voxels(int myID, char* file_name_voxels, float* density_max, struct vo
   MAIN_THREAD
   {
     printf("       Number of voxels in the input geometry file: %d x %d x %d =  %d\n", voxel_data->num_voxels.x, voxel_data->num_voxels.y, voxel_data->num_voxels.z, (voxel_data->num_voxels.x*voxel_data->num_voxels.y*voxel_data->num_voxels.z));
-    printf("       Voxel bounding box size:  %f x %f x %f cm  (bounding box volume=%f cm^3)\n", voxel_data->size_bbox.x, voxel_data->size_bbox.y, voxel_data->size_bbox.z,  voxel_volume);
+    printf("       Voxel bounding box size:  %f x %f x %f cm  (bounding box volume=%f cm^3)\n", voxel_data->size_bbox.x, voxel_data->size_bbox.y, voxel_data->size_bbox.z,  bbox_volume);
     printf("       Voxel geometry offset:    %f,  %f,  %f cm\n", voxel_data->offset.x, voxel_data->offset.y, voxel_data->offset.z);            // !!DBTv1.4!!
   }
 
