@@ -568,7 +568,39 @@ int main(int argc, char **argv)
   float* h_rho = NULL;
   
   read_input(argc, argv, myID, &total_histories, &seed_input, &gpu_id, &num_threads_per_block, &histories_per_thread, detector_data, &image, &image_bytes, source_data, &source_energy_data, &voxel_data, file_name_voxels, file_name_materials, file_name_output, file_name_espc, &num_projections, &voxels_Edep, &voxels_Edep_bytes, file_dose_output, &dose_ROI_x_min, &dose_ROI_x_max, &dose_ROI_y_min, &dose_ROI_y_max, &dose_ROI_z_min, &dose_ROI_z_max, &SRotAxisD, &translation_helical, &flag_material_dose, &flag_simulateMammoAfterDBT, &flag_detectorFixed, psf_data, E, &h_rho);
+  //MARK
+  
+  int nx = voxel_data.num_voxels.x;
+  int ny = voxel_data.num_voxels.y;
+  printf("After read_input: nx = %d, ny = %d\n", nx, ny);
+    
+  int ix = nx/2, iz = 1;
+  for (int iy = 0; iy < ny; iy++) {
+    long long idx = ix + (long long)iy*nx + (long long)iz*nx*ny;
+    double y0 = E.y[iy], y1 = E.y[iy+1];
+    double yc = 0.5*(y0+y1);
+    //float r = h_rho[ix + iy*nx + iz*nx*ny];
+    float r = h_rho[idx];
+    printf("iy=%d  idx=%lld y=[%g,%g] yc=%g  rho=%g\n", iy, idx, y0, y1, yc, r);
+  }
+  
+  for(int iy=0; iy<ny; iy++){
+    for(int ix=0; ix<nx; ix++){
+      double r = h_rho[ix + iy*nx + iz*nx*ny];
+      putchar((r < 0.01) ? '.' : '#'); // air vs solid
+    }
+    putchar('\n');
+  }
+  
+  auto idx = [&](int ix,int iy,int iz){
+  return (long long)ix + (long long)iy*nx + (long long)iz*nx*ny;
+  };
 
+  printf("rho L=%g R=%g B=%g T=%g\n",
+	 h_rho[idx(0,2,1)], h_rho[idx(nx-1,2,1)],
+	 h_rho[idx(3,0,1)], h_rho[idx(3,ny-1,1)]
+	 );
+  
   // *** Read the energy spectrum and initialize its sampling with the Walker aliasing method:
   MAIN_THREAD printf("    -- Reading the energy spectrum and initializing the Walker aliasing sampling algorithm.\n");
   float mean_energy_spectrum = 0.0f;  
@@ -720,6 +752,15 @@ int main(int argc, char **argv)
     const int nz = (int)voxel_data.num_voxels.z;
 
     printf("nx = %d, ny = %d, nz = %d\n", nx, ny, nz);
+  
+    int ix = nx/2, iz = 1;
+    for (int iy = 0; iy < ny; iy++) {
+    long long idx = ix + (long long)iy*nx + (long long)iz*nx*ny;
+    printf("*** iy=%d idx=%lld  rho=%g  mat0=%d\n",
+	   iy, idx, h_rho[idx], voxel_mat_dens[idx]); // mat0 is 0-based in your fixed path
+    }
+
+    //MARK
 
     // Sanity: edge vectors match dims
     if ((int)E.x.size() != nx + 1 || (int)E.y.size() != ny + 1 || (int)E.z.size() != nz + 1) {
@@ -1306,7 +1347,6 @@ int main(int argc, char **argv)
     dose_ROI_z_min_CONST = dose_ROI_z_min;
     dose_ROI_z_max_CONST = dose_ROI_z_max;
 
-    MARK
     int CPU_batch;
     for(CPU_batch=0; CPU_batch<total_threads; CPU_batch++)
     {
@@ -1565,7 +1605,7 @@ int main(int argc, char **argv)
 #endif
         
     // -- Report the total dose for all the projections:
-    MAIN_THREAD report_voxels_dose(file_dose_output, num_projections, &voxel_data, voxel_mat_dens, voxels_Edep, time_total_MC_simulation, total_histories, dose_ROI_x_min, dose_ROI_x_max, dose_ROI_y_min, dose_ROI_y_max, dose_ROI_z_min, dose_ROI_z_max, source_data, E);
+    MAIN_THREAD report_voxels_dose(file_dose_output, num_projections, &voxel_data, voxel_mat_dens, voxels_Edep, time_total_MC_simulation, total_histories, dose_ROI_x_min, dose_ROI_x_max, dose_ROI_y_min, dose_ROI_y_max, dose_ROI_z_min, dose_ROI_z_max, source_data, E, h_rho);
   }
   
   
@@ -1805,6 +1845,7 @@ static EdgeVectors build_edges(
 
     // If a single text file is provided, use it and ignore per-axis files + fallback
     if (edges_txt_path && *edges_txt_path) {
+      printf("Loading edges from: %s\n", edges_txt_path);
         load_edges_txt(edges_txt_path, nx, ny, nz, E.x, E.y, E.z);
 
         auto mono = [](const std::vector<float>& v){
@@ -2153,7 +2194,7 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
   // Read input fan beam polar (theta) and azimuthal (phi) aperture angles (deg):
   new_line_ptr = fgets_trimmed(new_line, 400, file_ptr);
   double phi_aperture, theta_aperture;
-    sscanf(new_line, "%lf %lf", &phi_aperture, &theta_aperture);
+  sscanf(new_line, "%lf %lf", &phi_aperture, &theta_aperture);
 
   if (0.5*theta_aperture > 180.0)
   {
@@ -2655,7 +2696,7 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
   {
     // -- NO: disabling tally
 	psf_data->state = false;
-    MAIN_THREAD printf("       3D voxel dose deposition tally DISABLED.\n");
+    MAIN_THREAD printf("       3D voxel PSF deposition tally DISABLED.\n");
   }
   else
   {
@@ -2721,7 +2762,6 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
   } 
 
   // JSM add in density array read, start
-
   
   // Build edges: try files, else synthesize uniform from your geometry
   // Replace these with your real sources:
@@ -2760,7 +2800,7 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
  
   voxel_data->num_voxels.x = nx;
   voxel_data->num_voxels.y = ny;
-  voxel_data->num_voxels.x = nz;
+  voxel_data->num_voxels.z = nz;
      
   char density_vox_path[512] = {0};  // empty = disabled
   // Parse a line like: density_vox_file = <path>
@@ -2817,11 +2857,11 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
   // Upload density + edges and bind constants
   float *d_xe=nullptr, *d_ye=nullptr, *d_ze=nullptr;
 
-  printf("Uploading to device \n");
+  //printf("Uploading to device \n");
   upload_grid_to_device(nx, ny, nz, E, h_rho, have_rho, d_rho, d_xe, d_ye, d_ze, g_d_gp);
   //printf("Uploaded to device, returned g_d_gp=%p \n", (void*)g_d_gp);
   // check that we transferred everything okay:
-  debug_gridparams_on_device(g_d_gp, /*print_all_if_small=*/1);
+  //debug_gridparams_on_device(g_d_gp, /*print_all_if_small=*/1);
 
   
   // JSM add in density array read, end
@@ -4377,7 +4417,7 @@ int report_image(char* file_name_output, struct detector_struct* detector_data, 
 //!       @param[in] source_data   Data required to compute the voxel plane to report in ASCII format: Z at the level of the source, 1st projection
 ////////////////////////////////////////////////////////////////////////////////
 // int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel_struct* voxel_data, float2* voxel_mat_dens, ulonglong2* voxels_Edep, double time_total_MC_init_report, unsigned long long int total_histories, short int dose_ROI_x_min, short int dose_ROI_x_max, short int dose_ROI_y_min, short int dose_ROI_y_max, short int dose_ROI_z_min, short int dose_ROI_z_max, struct source_struct* source_data)
-int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel_struct* voxel_data, int* voxel_mat_dens, ulonglong2* voxels_Edep, double time_total_MC_init_report, unsigned long long int total_histories, short int dose_ROI_x_min, short int dose_ROI_x_max, short int dose_ROI_y_min, short int dose_ROI_y_max, short int dose_ROI_z_min, short int dose_ROI_z_max, struct source_struct* source_data, struct EdgeVectors E)
+int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel_struct* voxel_data, int* voxel_mat_dens, ulonglong2* voxels_Edep, double time_total_MC_init_report, unsigned long long int total_histories, short int dose_ROI_x_min, short int dose_ROI_x_max, short int dose_ROI_y_min, short int dose_ROI_y_max, short int dose_ROI_z_min, short int dose_ROI_z_max, struct source_struct* source_data, struct EdgeVectors E, float *h_rho)
 {
   printf("\n\n          *** VOXEL ROI DOSE TALLY REPORT ***\n\n");
     
@@ -4425,9 +4465,6 @@ int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel
 
   if (z_plane_dose < dose_ROI_z_min || z_plane_dose > dose_ROI_z_max)
     z_plane_dose = (dose_ROI_z_max + dose_ROI_z_min) / 2;
-
-  if ( (z_plane_dose<dose_ROI_z_min) || (z_plane_dose>dose_ROI_z_max) )
-    z_plane_dose = (dose_ROI_z_max+dose_ROI_z_min)/2;
   
   int z_plane_dose_ROI = z_plane_dose - dose_ROI_z_min;
 
@@ -4470,7 +4507,7 @@ int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel
   fprintf(file_ptr, "#\n");  
   fprintf(file_ptr, "#\n");
   //fprintf(file_ptr, "#  Voxel size:  %lf x %lf x %lf = %lf cm^3\n", 1.0/(double)(voxel_data->inv_voxel_size.x), 1.0/(double)(voxel_data->inv_voxel_size.y), 1.0/(double)(voxel_data->inv_voxel_size.z), 1.0/(double)(voxel_data->inv_voxel_size.x*voxel_data->inv_voxel_size.y*voxel_data->inv_voxel_size.z));
-  fprintf(file_ptr, "#  *** Voxel sizes determined from edge file specification");
+  fprintf(file_ptr, "#  *** Voxel sizes determined from edge file specification\n");
   fprintf(file_ptr, "#  Number of voxels in the reported region of interest (ROI) X, Y and Z:\n");
   fprintf(file_ptr, "#      %d  %d  %d\n", DX, DY, DZ);
   fprintf(file_ptr, "#  Coordinates of the ROI inside the voxel volume = X[%d,%d], Y[%d,%d], Z[%d,%d]\n", dose_ROI_x_min+1, dose_ROI_x_max+1, dose_ROI_y_min+1, dose_ROI_y_max+1, dose_ROI_z_min+1, dose_ROI_z_max+1);  // Show ROI with index=1 for the first voxel instead of 0.
@@ -4486,6 +4523,7 @@ int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel
   double voxel_dose, max_voxel_dose[MAX_MATERIALS], max_voxel_dose_std_dev[MAX_MATERIALS], max_voxel_dose_all_mat=0.0, max_voxel_dose_std_dev_all_mat=0.0;
   int max_voxel_dose_x[MAX_MATERIALS], max_voxel_dose_y[MAX_MATERIALS], max_voxel_dose_z[MAX_MATERIALS];
   unsigned long long int total_energy_deposited = 0;
+  double total_Emean_eV_per_hist = 0.0;
   double inv_SCALE_eV = 1.0 / SCALE_eV,      // conversion to eV using the inverse of the constant used in the tally function (defined in the header file).         
                 inv_N = 1.0 / (double)(total_histories*((unsigned long long int)num_projections));
                                 
@@ -4544,9 +4582,13 @@ int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel
 	}
 
 	// Mass = density * volume (g), using your LUT (g/cm^3)
-	const double voxel_mass = ((double)density_LUT[mat_number]) * voxel_volume;
+	//const double voxel_mass = ((double)density_LUT[mat_number]) * voxel_volume;
+	const double voxel_mass = ((double)h_rho[voxel_geometry]) * voxel_volume;
 	const double inv_voxel_mass = 1.0 / voxel_mass;
-
+	//MARK
+	//printf("*** voxel = %lld, voxel_geometry = %lld\n", voxel, voxel_geometry);
+	printf("*** ix = %d, jy = %d, kz = %d, mat = %d, voxel = %d, voxel_geometry = %lld, voxel_volume = %f, voxel_mass = %f\n", ix, jy, kz, mat_number, voxel, voxel_geometry, voxel_volume, voxel_mass);
+	
 	// ROI material mass tally
 	mat_mass_ROI[mat_number] += voxel_mass;
 
@@ -4556,21 +4598,19 @@ int report_voxels_dose(char* file_dose_output, int num_projections, struct voxel
 	mat_voxels[mat_number]++;
 
 	// Convert total energy deposited to dose [eV/gram] per history:
-	voxel_dose = ((double)voxels_Edep[voxel].x) * inv_N * inv_SCALE_eV;
-	total_energy_deposited += voxels_Edep[voxel].x;
-
-	// Std dev propagation: sigma^2(dose) = sigma^2(Edep)/mass^2
-	// Using your existing convention (avoid SCALE_eV in std dev)
-	register double voxel_std_dev =
-	    (((double)voxels_Edep[voxel].y) * inv_N - voxel_dose * voxel_dose) * inv_N * inv_voxel_mass;
-
-	if (voxel_std_dev > 0.0)
-	  voxel_std_dev = sqrt(voxel_std_dev);
-	else
-	  voxel_std_dev = 0.0;
-
-	voxel_dose *= inv_voxel_mass;
-
+	
+	const double Emean = ((double)voxels_Edep[voxel].x) * inv_N * inv_SCALE_eV;        // eV/hist
+	const double E2mean = ((double)voxels_Edep[voxel].y) * inv_N;                     // (scaled units^2)/hist  (per your original convention)
+	double varE = (E2mean - Emean*Emean) * inv_N;                                     // eV^2/hist^2  (units consistent w/ original approach)
+	if (varE < 0.0) varE = 0.0;
+	const double dose_mean = Emean * inv_voxel_mass;                                  // eV/g/hist
+	const double dose_std  = sqrt(varE) * inv_voxel_mass;                             // eV/g/hist  (ONE power in std dev)
+	
+	total_Emean_eV_per_hist += Emean;  // already eV/hist for this voxel
+	
+	voxel_dose = dose_mean;
+	double voxel_std_dev = dose_std;
+	
 	// Peak dose per material
 	if (voxel_dose > max_voxel_dose[mat_number])
 	{
