@@ -2821,7 +2821,7 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
   upload_grid_to_device(nx, ny, nz, E, h_rho, have_rho, d_rho, d_xe, d_ye, d_ze, g_d_gp);
   //printf("Uploaded to device, returned g_d_gp=%p \n", (void*)g_d_gp);
   // check that we transferred everything okay:
-  //debug_gridparams_on_device(g_d_gp, /*print_all_if_small=*/1);
+  debug_gridparams_on_device(g_d_gp, /*print_all_if_small=*/1);
 
   
   // JSM add in density array read, end
