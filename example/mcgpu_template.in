@@ -2,32 +2,32 @@
 # >>>> INPUT FILE FOR MC-GPU v1.5 VICTRE-DBT >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
  
 #[SECTION SIMULATION CONFIG v.2009-05-12]
-2                               # TOTAL NUMBER OF HISTORIES, OR SIMULATION TIME IN SECONDS IF VALUE < 100000
-123456789                       # RANDOM SEED (ranecu PRNG)
-1                               # GPU NUMBER TO USE WHEN MPI IS NOT USED, OR TO BE AVOIDED IN MPI RUNS
-128                             # GPU THREADS PER CUDA BLOCK (multiple of 32)
-5000                            # SIMULATED HISTORIES PER GPU THREAD
+dataset.ncase                   # TOTAL NUMBER OF HISTORIES, OR SIMULATION TIME IN SECONDS IF VALUE < 100000
+dataset.inseed                  # RANDOM SEED (ranecu PRNG), was 123456789
+dataset.gpu.num_gpu             # GPU NUMBER TO USE WHEN MPI IS NOT USED, OR TO BE AVOIDED IN MPI RUNS
+dataset.gpu.threads_per_block   # GPU THREADS PER CUDA BLOCK (multiple of 32), was 128
+dataset.gpu.histories_per_gpu   # SIMULATED HISTORIES PER GPU THREAD, was 5000
  
 #[SECTION SOURCE v.2016-12-02]
 spectrum/w_rh_28.txt            # X-RAY ENERGY SPECTRUM FILE
- 0.0  0.0   -50.0                 # SOURCE POSITION: X (chest-to-nipple), Y (right-to-left), Z (caudal-to-cranial) [cm]
- 0.0    0.0    1.0              # SOURCE DIRECTION COSINES: U V W
+dataset.src.xyz_cm              # SOURCE POSITION: X (chest-to-nipple), Y (right-to-left), Z (caudal-to-cranial) [cm] was 0.0 0.0 -50.0
+dataset.src.uvw                 # SOURCE DIRECTION COSINES: U V W, was 0.0    0.0    1.0 
 -1 -1                           # TOTAL AZIMUTHAL (WIDTH, X) AND POLAR (HEIGHT, Z) APERTURES OF THE FAN BEAM [degrees] (input negative to automatically cover the whole detector)
-90.0  90.0   270.0              # EULER ANGLES (RzRyRz) TO ROTATE RECTANGULAR BEAM FROM DEFAULT POSITION AT Y=0, NORMAL=(0,-1,0)
- 0.0000                         # SOURCE GAUSSIAN FOCAL SPOT FWHM [cm]
- 0.0                            # 0.18 for DBT, 0 for FFDM [Mackenzie2017]  # ANGULAR BLUR DUE TO MOVEMENT ([exposure_time]*[angular_speed]) [degrees]
+dataset.src.euler_deg           # EULER ANGLES (RzRyRz) TO ROTATE RECTANGULAR BEAM FROM DEFAULT POSITION AT Y=0, NORMAL=(0,-1,0) was 90.0 90.0 270.0
+dataset.src.fs_fwhm_cm          # SOURCE GAUSSIAN FOCAL SPOT FWHM [cm] was 0.0000
+dataset.src.ang_blur_deg        # 0.18 for DBT, 0 for FFDM [Mackenzie2017]  # ANGULAR BLUR DUE TO MOVEMENT ([exposure_time]*[angular_speed]) [degrees] was 0.0
 NO				# COLLIMATE BEAM TOWARDS POSITIVE AZIMUTHAL (X) ANGLES ONLY? (ie, cone-beam center aligned with chest wall in mammography) [YES/NO]
  
 #[SECTION IMAGE DETECTOR v.2017-06-20]
-images/mcgpu_image                     # OUTPUT IMAGE FILE NAME
-512      512                    # NUMBER OF PIXELS IN THE IMAGE: Nx Nz
-60.00     60.0                  # IMAGE SIZE (width, height): Dx Dz [cm]
-105.0                           # SOURCE-TO-DETECTOR DISTANCE (detector set in front of the source, perpendicular to the initial direction)
- 0.0    0.0                     # IMAGE OFFSET ON DETECTOR PLANE IN WIDTH AND HEIGHT DIRECTIONS (BY DEFAULT BEAM CENTERED AT IMAGE CENTER) [cm]
- 0.0250                         # DETECTOR THICKNESS [cm]
- 0.004027  # ==> MFP(Se,19.0keV)  # DETECTOR MATERIAL MEAN FREE PATH AT AVERAGE ENERGY [cm]
- 12658.0 11223.0 0.596 0.00593  # DETECTOR K-EDGE ENERGY [eV], K-FLUORESCENCE ENERGY [eV], K-FLUORESCENCE YIELD, MFP AT FLUORESCENCE ENERGY [cm]
- 50.0    0.99                   # EFECTIVE DETECTOR GAIN, W_+- [eV/ehp], AND SWANK FACTOR (input 0 to report ideal energy fluence)
+dataset.im.path                 # OUTPUT IMAGE FILE NAME was images/mcgpu_image
+det.nu  det.nv                # NUMBER OF PIXELS IN THE IMAGE: Nx Nz was 512 512
+det.pixWid_u_cm det.pixWid_v_cm  # IMAGE SIZE (width, height): Dx Dz [cm] was 60.0 60.0
+spec.SSD_cm                     # SOURCE-TO-DETECTOR DISTANCE (detector set in front of the source, perpendicular to the initial direction) was 105.0
+spec.im_offset_uv_cm            # IMAGE OFFSET ON DETECTOR PLANE IN WIDTH AND HEIGHT DIRECTIONS (BY DEFAULT BEAM CENTERED AT IMAGE CENTER) [cm] was 0.0 0.0
+det.thickness_cm                # DETECTOR THICKNESS [cm] was 0.0250
+det.MFP_cm                      # 0.004027  # ==> MFP(Se,19.0keV)  # DETECTOR MATERIAL MEAN FREE PATH AT AVERAGE ENERGY [cm] was  0.004027
+det.fluor_line		        # DETECTOR K-EDGE ENERGY [eV], K-FLUORESCENCE ENERGY [eV], K-FLUORESCENCE YIELD, MFP AT FLUORESCENCE ENERGY [cm] was  12658.0 11223.0 0.596 0.00593
+ 50.0    0.99                   # EFFECTIVE DETECTOR GAIN, W_+- [eV/ehp], AND SWANK FACTOR (input 0 to report ideal energy fluence) was  50.0    0.99
  5200.0                         # ADDITIVE ELECTRONIC NOISE LEVEL (electrons/pixel)
  0.10  2.65888          # ==> MFP(polystyrene,19keV)       # PROTECTIVE COVER THICKNESS (detector+grid) [cm], MEAN FREE PATH AT AVERAGE ENERGY [cm]
  0 0.0 0.0
