@@ -375,6 +375,7 @@
 //jsm added:
 #include <zlib.h>
 #include <cuda_runtime_api.h>
+#include <stddef.h>
 #ifndef cudaThreadSynchronize
 #define cudaThreadSynchronize cudaDeviceSynchronize
 #endif
@@ -408,10 +409,26 @@ static inline int mcgpu_kernel_timeout(int gpu_id, const cudaDeviceProp* prop) {
 // *** Include header file with the structures and functions declarations
 #include <MC-GPU_v1.5b_rho.h>
 
+#ifdef USE_IAEA_PHSP
+#include <iaea_phsp.h>
+#endif
+
 // *** Include the computing kernel:
 //#include <MC-GPU_kernel_v1.5b.cu>
 #include <MC-GPU_kernel_v1.5b_rho.cu>
 
+#ifdef USING_CUDA
+static void set_psf_device_state(struct psf_struct* psf_data_device, bool enabled);
+static void reset_psf_device_counters(struct psf_struct* psf_data_device);
+static int copy_psf_chunk_from_device(struct psf_struct* psf_data,
+                                      struct psf_struct* psf_data_device);
+#endif
+static int append_psf_chunk(const char* file_name_output,
+                            const struct psf_struct* psf_data,
+                            unsigned long long int total_histories,
+                            struct psf_stream_state* stream_state);
+static int report_psf_stream_summary(const char* file_name_output,
+                                     const struct psf_stream_state* stream_state);
 
 ////////////////////////////////////////////////////////////////////////////////
 //!  Main program of MC-GPU: initialize the simulation enviroment, launch the GPU 
@@ -516,6 +533,7 @@ int main(int argc, char **argv)
         printf("\n\n   !!malloc ERROR!! Not enough memory to allocate the PSF ARRAY!!\n\n");
         exit(-2);
       }
+  memset(psf_data, 0, sizeof(struct psf_struct));
   
     //   float2 *voxel_mat_dens = NULL;
     //   char *voxel_mat_dens = NULL;                   // Pointer where voxels array will be allocated                 //!!FixedDensity_DBT!! Density taken from function "density_LOT"
@@ -1061,12 +1079,19 @@ int main(int argc, char **argv)
         else
           printf("\n\n\n\n   << Simulating tomographic projection %d of %d >> Angle: %lf degrees.\n\n", num_p, num_projections, current_angle*RAD2DEG);
 
-    
+    char file_name_output_num_p[253];
+    if (1==num_projections)
+      strcpy(file_name_output_num_p, file_name_output);
+    else
+      sprintf(file_name_output_num_p, "%s_%04d", file_name_output, num_p);
+
     clock_start = clock();   // Start the CPU clock
     
 #ifdef USING_CUDA
       
     // *** Simulate in the GPUs the input amount of time or amount of particles:
+    const bool psf_streaming_enabled = (psf_data && psf_data->state && psf_data->mode == PSF_MODE_DETECTOR_PLANE);
+    struct psf_stream_state psf_stream = {false, 0, 0};
     
     // -- Estimate GPU speed to use a total simulation time or multiple GPUs:    
     
@@ -1115,6 +1140,8 @@ int main(int argc, char **argv)
       clock_kernel = clock();
       // -- Launch Monte Carlo simulation kernel for the speed test:
       if (!g_d_gp) { printf("FATAL: g_d_gp is null at kernel launch\n"); exit(1); }
+      if (psf_streaming_enabled)
+        set_psf_device_state(psf_data_device, false);
       
       track_particles<<<blocks_speed_test,threads_speed_test>>>(histories_per_thread, (short int)num_p, seed_input_device, image_device, voxels_Edep_device, voxel_mat_dens_device, bitree_device, mfp_Woodcock_table_device, mfp_table_a_device, mfp_table_b_device, rayleigh_table_device, compton_table_device, detector_data_device, source_data_device, materials_dose_device, psf_data_device, g_d_gp);
       
@@ -1134,6 +1161,11 @@ int main(int argc, char **argv)
       //cudaThreadSynchronize();    // Force the runtime to wait until GPU kernel has completed
       cudaDeviceSynchronize(); // FOR CUDA 10.0
       getLastCudaError("\n\n !!Kernel execution failed while simulating particle tracks!! ");   // Check if the CUDA function returned any error
+      if (psf_streaming_enabled)
+      {
+        reset_psf_device_counters(psf_data_device);
+        set_psf_device_state(psf_data_device, true);
+      }
 
       float speed_test_time = float(clock()-clock_kernel)/CLOCKS_PER_SEC;
 
@@ -1235,7 +1267,6 @@ int main(int argc, char **argv)
     
     
     // -- Setup the execution parameters (Max number threads per block: 512, Max sizes each dimension of grid: 65535x65535x1)
-    dim3 blocks(total_threads_blocks, 1);
     dim3 threads(num_threads_per_block, 1); 
     
     clock_kernel = clock();
@@ -1254,10 +1285,6 @@ int main(int argc, char **argv)
 	  printf("\n");
     }
   
-    track_particles<<<blocks,threads>>>(histories_per_thread, (short int)num_p, seed_input_device, image_device, voxels_Edep_device, voxel_mat_dens_device, bitree_device, mfp_Woodcock_table_device, mfp_table_a_device, mfp_table_b_device, rayleigh_table_device, compton_table_device, detector_data_device, source_data_device, materials_dose_device, psf_data_device, g_d_gp);
-    
-
-
     #ifdef USING_MPI 
       if (numprocs>1)  // Using more than 1 MPI thread:
       {
@@ -1288,9 +1315,38 @@ int main(int argc, char **argv)
     #endif
    
     fflush(stdout);
-    //cudaThreadSynchronize();    // Force the runtime to wait until the GPU kernel is completed
-    cudaDeviceSynchronize(); // FOR CUDA 10.0
-    getLastCudaError("\n\n !!Kernel execution failed while simulating particle tracks!! ");  // Check if kernel execution generated any error
+
+    int psf_blocks_per_chunk = total_threads_blocks;
+    if (psf_streaming_enabled)
+    {
+      const unsigned long long histories_per_block = (unsigned long long)num_threads_per_block * (unsigned long long)histories_per_thread;
+      psf_blocks_per_chunk = (int)((unsigned long long)PSF_STREAM_TARGET_HIST / histories_per_block);
+      if (psf_blocks_per_chunk < 1) psf_blocks_per_chunk = 1;
+      if (psf_blocks_per_chunk > total_threads_blocks) psf_blocks_per_chunk = total_threads_blocks;
+      MAIN_THREAD printf("        ==> PSF streaming: flushing every %d CUDA block(s), target <= %d detector-plane records per chunk.\n",
+                         psf_blocks_per_chunk, PSF_STREAM_TARGET_HIST);
+    }
+
+    int blocks_remaining = total_threads_blocks;
+    while (blocks_remaining > 0)
+    {
+      const int blocks_this_chunk = (blocks_remaining > psf_blocks_per_chunk) ? psf_blocks_per_chunk : blocks_remaining;
+      dim3 blocks(blocks_this_chunk, 1);
+
+      track_particles<<<blocks,threads>>>(histories_per_thread, (short int)num_p, seed_input_device, image_device, voxels_Edep_device, voxel_mat_dens_device, bitree_device, mfp_Woodcock_table_device, mfp_table_a_device, mfp_table_b_device, rayleigh_table_device, compton_table_device, detector_data_device, source_data_device, materials_dose_device, psf_data_device, g_d_gp);
+
+      cudaDeviceSynchronize(); // FOR CUDA 10.0
+      getLastCudaError("\n\n !!Kernel execution failed while simulating particle tracks!! ");  // Check if kernel execution generated any error
+
+      if (psf_streaming_enabled)
+      {
+        copy_psf_chunk_from_device(psf_data, psf_data_device);
+        MAIN_THREAD append_psf_chunk(file_name_output_num_p, psf_data, total_histories, &psf_stream);
+        reset_psf_device_counters(psf_data_device);
+      }
+
+      blocks_remaining -= blocks_this_chunk;
+    }
 
     float real_GPU_speed = total_histories_current_kernel_float/(float(clock()-clock_kernel)/CLOCKS_PER_SEC);  // GPU speed for all the image simulation, not just the speed test.
     
@@ -1304,8 +1360,9 @@ int main(int argc, char **argv)
     // -- Copy the simulated image from the GPU memory to the CPU:           
     checkCudaErrors(cudaMemcpy(image, image_device, image_bytes, cudaMemcpyDeviceToHost) );  // Copy final results to host
 
-    // -- Copy the PSF data to CPU
-	checkCudaErrors(cudaMemcpy(psf_data, psf_data_device, sizeof(psf_struct), cudaMemcpyDeviceToHost) );  // Copy final results to host
+    // -- Copy the PSF data to CPU for the legacy non-streaming path
+    if (!psf_streaming_enabled)
+      checkCudaErrors(cudaMemcpy(psf_data, psf_data_device, sizeof(psf_struct), cudaMemcpyDeviceToHost) );  // Copy final results to host
 
          
 ///////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1433,27 +1490,25 @@ int main(int argc, char **argv)
 #endif               
 
     // *** Report the final results:
-    char file_name_output_num_p[253];
-    
-          //     if (1==num_projections || (flag_simulateMammoAfterDBT && 0==num_p))                                     // !!DBTv1.4!!
-    
-    if (1==num_projections)
-      strcpy(file_name_output_num_p, file_name_output);   // Use the input name for single projection
-    else
-      sprintf(file_name_output_num_p, "%s_%04d", file_name_output, num_p);   // Create the output file name with the input name + projection number (4 digits, padding with 0)
 
     if (num_p>0)
     {     
       MAIN_THREAD report_image(file_name_output_num_p, detector_data, source_data, mean_energy_spectrum, image, time_elapsed_MC_loop, total_histories, num_p, num_projections, myID, numprocs, current_angle, &seed_input);
       //Phase Space File Report 
-      MAIN_THREAD report_psf(file_name_output_num_p, psf_data, &voxel_data, E);
+      if (psf_streaming_enabled)
+        MAIN_THREAD report_psf_stream_summary(file_name_output_num_p, &psf_stream);
+      else
+        MAIN_THREAD report_psf(file_name_output_num_p, psf_data, &voxel_data, E, total_histories);
     }
     else
     {
       // Projection 0 happens only when num_projections==1 or when flag_simulateMammoAfterDBT==true:
       MAIN_THREAD report_image(file_name_output_num_p, detector_data, source_data, mean_energy_spectrum, image, time_elapsed_MC_loop, total_histories, 0, 1, myID, numprocs, current_angle, &seed_input);
       //Phase Space File Report 
-      MAIN_THREAD report_psf(file_name_output_num_p, psf_data, &voxel_data, E);
+      if (psf_streaming_enabled)
+        MAIN_THREAD report_psf_stream_summary(file_name_output_num_p, &psf_stream);
+      else
+        MAIN_THREAD report_psf(file_name_output_num_p, psf_data, &voxel_data, E, total_histories);
     }
 
     // *** Clear the image after reporting, unless this is the last projection to simulate:
@@ -1467,7 +1522,10 @@ int main(int argc, char **argv)
         fflush(stdout);
         //NOW FOR PSF DEBUG		
 		//reset other arrays 
-		checkCudaErrors(cudaMemcpy(psf_data_device, psf_data, sizeof(psf_struct), cudaMemcpyHostToDevice)); 
+        if (psf_streaming_enabled)
+          reset_psf_device_counters(psf_data_device);
+        else
+          checkCudaErrors(cudaMemcpy(psf_data_device, psf_data, sizeof(psf_struct), cudaMemcpyHostToDevice)); 
         //cudaThreadSynchronize();
         cudaDeviceSynchronize(); // FOR CUDA 10.0
         getLastCudaError("\n\n !!Kernel execution failed initializing the image array!! ");  // Check if kernel execution generated any error:
@@ -2671,7 +2729,7 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
 
   if (0==strncmp("YE",new_line,2) || 0==strncmp("Ye",new_line,2) || 0==strncmp("ye",new_line,2))
   {
-    // -- YES: using the tally
+    // -- YES: score photons crossing the detector plane.
     psf_data->state = true;
 	new_line_ptr = fgets_trimmed(new_line, 250, file_ptr); sscanf(new_line, "%hhd", &psf_data->psf_voi);   // # NUMBER OF  VOXELS TO TALLY PSF
 	if (psf_data->psf_voi>MAXPSFVOI)
@@ -2689,14 +2747,20 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
     new_line_ptr = fgets_trimmed(new_line, 250, file_ptr); sscanf(new_line, "%hd %hd %hd %hd %hd", 
 	&psf_data->voxindex[0].z, &psf_data->voxindex[1].z, &psf_data->voxindex[2].z, &psf_data->voxindex[3].z, &psf_data->voxindex[4].z);   // # VOXELS TO TALLY PSF: Z-index (first voxel has index 0)
 
-    MAIN_THREAD printf("       3D PSF tally ENABLED.\n");
+    psf_data->psf_voi = 1;
+    psf_data->mode = PSF_MODE_DETECTOR_PLANE;
+    for (int ipsf = 0; ipsf < MAXPSFVOI; ++ipsf) psf_data->psf_total[ipsf] = 0;
+
+    MAIN_THREAD printf("       Detector-plane phase-space tally ENABLED.\n");
     
   }
   else if (0==strncmp("NO",new_line,2) || 0==strncmp("No",new_line,2) || 0==strncmp("no",new_line,2))
   {
     // -- NO: disabling tally
 	psf_data->state = false;
-    MAIN_THREAD printf("       3D voxel PSF deposition tally DISABLED.\n");
+    psf_data->psf_voi = 0;
+    psf_data->mode = 0;
+    MAIN_THREAD printf("       Phase-space tally DISABLED.\n");
   }
   else
   {
@@ -4791,6 +4855,191 @@ int report_materials_dose(int num_projections, unsigned long long int total_hist
 ///////////////////////////////////////////////////////////////////////////////
 
 ////////////////////////////////////////////////////////////////////////////////
+//! Write detector-plane PSF records directly in IAEA phase-space format.
+//! Energy in MC-GPU is eV; IAEA stores MeV.
+////////////////////////////////////////////////////////////////////////////////
+static int report_psf_iaea(const char* file_name_output,
+                           const struct psf_struct* psf_data,
+                           unsigned long long int total_histories,
+                           bool append)
+{
+#ifndef USE_IAEA_PHSP
+  (void)file_name_output;
+  (void)psf_data;
+  (void)total_histories;
+  (void)append;
+  return 0;
+#else
+  if (!psf_data || !psf_data->state || psf_data->mode != PSF_MODE_DETECTOR_PLANE)
+    return 0;
+
+  char file_iaea[250];
+  snprintf(file_iaea, sizeof(file_iaea), "%s_psf", file_name_output);
+
+  IAEA_I32 source_write = 0;
+  IAEA_I32 access_write = append ? 3 : 2;
+  IAEA_I32 result = 0;
+  IAEA_I32 file_len = (IAEA_I32)strlen(file_iaea);
+  iaea_new_source(&source_write, file_iaea, &access_write, &result, file_len);
+  if (result < 0)
+  {
+    printf("\n\n   !!IAEA ERROR report_psf!! Could not create IAEA phase-space %s (result=%d).\n", file_iaea, (int)result);
+    return -3;
+  }
+
+  IAEA_I32 n_extra_float = 0;
+  IAEA_I32 n_extra_int = 0;
+  iaea_set_extra_numbers(&source_write, &n_extra_float, &n_extra_int);
+
+  IAEA_I64 n_original = (IAEA_I64)total_histories;
+  iaea_set_total_original_particles(&source_write, &n_original);
+
+  const unsigned long long recorded = psf_data->psf_total[0];
+  const unsigned long long n = (recorded > (unsigned long long)MAXPSFHIST) ? (unsigned long long)MAXPSFHIST : recorded;
+  IAEA_Float extra_floats[1] = {0};
+  IAEA_I32 extra_ints[1] = {0};
+
+  for (unsigned long long i = 0; i < n; ++i)
+  {
+    IAEA_I32 n_stat = 1;      // Without per-history IDs, mark each record as a new history.
+    IAEA_I32 type = 1;        // IAEA photon.
+    IAEA_Float e = (IAEA_Float)(psf_data->psfener[i] * 1.0e-6f);
+    IAEA_Float wt = (IAEA_Float)1.0;
+    IAEA_Float x = (IAEA_Float)psf_data->psfpos[i].x;
+    IAEA_Float y = (IAEA_Float)psf_data->psfpos[i].y;
+    IAEA_Float z = (IAEA_Float)psf_data->psfpos[i].z;
+    IAEA_Float u = (IAEA_Float)psf_data->psfdir[i].x;
+    IAEA_Float v = (IAEA_Float)psf_data->psfdir[i].y;
+    IAEA_Float w = (IAEA_Float)psf_data->psfdir[i].z;
+
+    iaea_write_particle(&source_write, &n_stat, &type, &e, &wt, &x, &y, &z, &u, &v, &w, extra_floats, extra_ints);
+  }
+
+  iaea_destroy_source(&source_write, &result);
+  if (result < 0)
+  {
+    printf("\n\n   !!IAEA ERROR report_psf!! Could not close IAEA phase-space %s (result=%d).\n", file_iaea, (int)result);
+    return -3;
+  }
+
+  return 0;
+#endif
+}
+
+static int append_psf_chunk(const char* file_name_output,
+                            const struct psf_struct* psf_data,
+                            unsigned long long int total_histories,
+                            struct psf_stream_state* stream_state)
+{
+  if (!psf_data || !psf_data->state || psf_data->mode != PSF_MODE_DETECTOR_PLANE || !stream_state)
+    return 0;
+
+  const unsigned long long recorded = psf_data->psf_total[0];
+  const unsigned long long n = (recorded > (unsigned long long)MAXPSFHIST) ? (unsigned long long)MAXPSFHIST : recorded;
+  if (recorded > (unsigned long long)MAXPSFHIST)
+    stream_state->overflow += recorded - (unsigned long long)MAXPSFHIST;
+
+  if (n == 0)
+    return 0;
+
+  char file_raw[250];
+  snprintf(file_raw, sizeof(file_raw), "%s_psf.raw", file_name_output);
+  FILE* fp = fopen(file_raw, stream_state->initialized ? "ab" : "wb");
+  if (!fp)
+  {
+    printf("\n\n   !!fopen ERROR append_psf_chunk!! Binary file %s can not be opened for writing!!\n", file_raw);
+    return -3;
+  }
+
+  for (unsigned long long i = 0; i < n; ++i)
+  {
+    fwrite(&psf_data->psfpos[i].x, sizeof(float), 1, fp);
+    fwrite(&psf_data->psfpos[i].y, sizeof(float), 1, fp);
+    fwrite(&psf_data->psfpos[i].z, sizeof(float), 1, fp);
+    fwrite(&psf_data->psfdir[i].x, sizeof(float), 1, fp);
+    fwrite(&psf_data->psfdir[i].y, sizeof(float), 1, fp);
+    fwrite(&psf_data->psfdir[i].z, sizeof(float), 1, fp);
+    fwrite(&psf_data->psfener[i], sizeof(float), 1, fp);
+  }
+  fclose(fp);
+
+  report_psf_iaea(file_name_output, psf_data, total_histories, stream_state->initialized);
+
+  stream_state->initialized = true;
+  stream_state->written += n;
+  return 0;
+}
+
+static int report_psf_stream_summary(const char* file_name_output,
+                                     const struct psf_stream_state* stream_state)
+{
+  if (!stream_state || !stream_state->initialized)
+    return 0;
+
+  char file_txt[250];
+  snprintf(file_txt, sizeof(file_txt), "%s_psf.txt", file_name_output);
+  FILE* ft = fopen(file_txt, "w");
+  if (!ft)
+  {
+    printf("\n\n   !!fopen ERROR report_psf_stream_summary!! Text file %s can not be opened for writing!!\n", file_txt);
+    return -3;
+  }
+
+  fprintf(ft, "Detector-plane phase-space tally\n");
+  fprintf(ft, "N %llu\n", (unsigned long long)stream_state->written);
+  if (stream_state->overflow > 0)
+    fprintf(ft, "N_OVERFLOW %llu\n", (unsigned long long)stream_state->overflow);
+  fclose(ft);
+  return 0;
+}
+
+#ifdef USING_CUDA
+static void set_psf_device_state(struct psf_struct* psf_data_device, bool enabled)
+{
+  const bool state_value = enabled;
+  checkCudaErrors(cudaMemcpy((char*)psf_data_device + offsetof(struct psf_struct, state),
+                             &state_value, sizeof(bool), cudaMemcpyHostToDevice));
+}
+
+static void reset_psf_device_counters(struct psf_struct* psf_data_device)
+{
+  checkCudaErrors(cudaMemset((char*)psf_data_device + offsetof(struct psf_struct, psf_total),
+                             0, MAXPSFVOI * sizeof(unsigned long long int)));
+}
+
+static int copy_psf_chunk_from_device(struct psf_struct* psf_data,
+                                      struct psf_struct* psf_data_device)
+{
+  if (!psf_data || !psf_data_device)
+    return -1;
+
+  checkCudaErrors(cudaMemcpy(psf_data->psf_total,
+                             (char*)psf_data_device + offsetof(struct psf_struct, psf_total),
+                             MAXPSFVOI * sizeof(unsigned long long int),
+                             cudaMemcpyDeviceToHost));
+
+  const unsigned long long recorded = psf_data->psf_total[0];
+  const unsigned long long n = (recorded > (unsigned long long)MAXPSFHIST) ? (unsigned long long)MAXPSFHIST : recorded;
+  if (n == 0)
+    return 0;
+
+  checkCudaErrors(cudaMemcpy(psf_data->psfpos,
+                             (char*)psf_data_device + offsetof(struct psf_struct, psfpos),
+                             (size_t)n * sizeof(float3),
+                             cudaMemcpyDeviceToHost));
+  checkCudaErrors(cudaMemcpy(psf_data->psfdir,
+                             (char*)psf_data_device + offsetof(struct psf_struct, psfdir),
+                             (size_t)n * sizeof(float3),
+                             cudaMemcpyDeviceToHost));
+  checkCudaErrors(cudaMemcpy(psf_data->psfener,
+                             (char*)psf_data_device + offsetof(struct psf_struct, psfener),
+                             (size_t)n * sizeof(float),
+                             cudaMemcpyDeviceToHost));
+  return 0;
+}
+#endif
+
+////////////////////////////////////////////////////////////////////////////////
 //! Report the tallied PSF in binary form (32-bit floats).
 //! The structure follows X Y Z U V W E.
 //! 
@@ -4802,19 +5051,23 @@ int report_materials_dose(int num_projections, unsigned long long int total_hist
 int report_psf(const char* file_name_output,
                struct psf_struct* psf_data,
                const struct voxel_struct* voxel_data,
-               const EdgeVectors& E)   
+               const EdgeVectors& E,
+               unsigned long long int total_histories)
 {
   if (!psf_data || !psf_data->state) return 0;
 
   char file_txt[250];
   char file_raw[250];
+  const bool detector_plane_mode = (psf_data->mode == PSF_MODE_DETECTOR_PLANE);
+  const int num_outputs = detector_plane_mode ? 1 : (int)psf_data->psf_voi;
 
   // Write per-VOI raw files
-  for (int voi = 0; voi < (int)psf_data->psf_voi; voi++)
+  for (int voi = 0; voi < num_outputs; voi++)
   {
-    // output_<voi+1>_psf.raw
-    // snprintf guarantees NUL termination
-    snprintf(file_raw, sizeof(file_raw), "%s_%d_psf.raw", file_name_output, voi + 1);
+    if (detector_plane_mode)
+      snprintf(file_raw, sizeof(file_raw), "%s_psf.raw", file_name_output);
+    else
+      snprintf(file_raw, sizeof(file_raw), "%s_%d_psf.raw", file_name_output, voi + 1);
 
     FILE* fp = fopen(file_raw, "wb");
     if (!fp)
@@ -4824,7 +5077,8 @@ int report_psf(const char* file_name_output,
     }
 
     const unsigned long long base = (unsigned long long)MAXPSFHIST * (unsigned long long)voi;
-    const unsigned long long n = psf_data->psf_total[voi];
+    const unsigned long long recorded = psf_data->psf_total[voi];
+    const unsigned long long n = (recorded > (unsigned long long)MAXPSFHIST) ? (unsigned long long)MAXPSFHIST : recorded;
 
     for (unsigned long long i = 0; i < n; i++)
     {
@@ -4839,15 +5093,13 @@ int report_psf(const char* file_name_output,
       fwrite(&psf_data->psfdir[idx].z, sizeof(float), 1, fp);
 
       fwrite(&psf_data->psfener[idx], sizeof(float), 1, fp);
-
-      // reset counters (optional)
-      psf_data->psfpos[idx].x = psf_data->psfpos[idx].y = psf_data->psfpos[idx].z = 0.0f;
-      psf_data->psfdir[idx].x = psf_data->psfdir[idx].y = psf_data->psfdir[idx].z = 0.0f;
-      psf_data->psfener[idx]  = 0.0f;
     }
 
     fclose(fp);
   }
+
+  if (detector_plane_mode)
+    report_psf_iaea(file_name_output, psf_data, total_histories, false);
 
   // Summary text
   snprintf(file_txt, sizeof(file_txt), "%s_psf.txt", file_name_output);
@@ -4856,6 +5108,19 @@ int report_psf(const char* file_name_output,
   {
     printf("\n\n   !!fopen ERROR report_psf!! Text file %s can not be opened for writing!!\n", file_txt);
     return -3;
+  }
+
+  if (detector_plane_mode)
+  {
+    const unsigned long long recorded = psf_data->psf_total[0];
+    const unsigned long long n = (recorded > (unsigned long long)MAXPSFHIST) ? (unsigned long long)MAXPSFHIST : recorded;
+    fprintf(ft, "Detector-plane phase-space tally\n");
+    fprintf(ft, "N %llu\n", (unsigned long long)n);
+    if (recorded > (unsigned long long)MAXPSFHIST)
+      fprintf(ft, "N_OVERFLOW %llu\n", (unsigned long long)(recorded - (unsigned long long)MAXPSFHIST));
+    psf_data->psf_total[0] = 0;
+    fclose(ft);
+    return 0;
   }
 
   // Helper: center coordinate from edges + offset.

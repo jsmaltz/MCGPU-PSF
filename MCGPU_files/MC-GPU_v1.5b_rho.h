@@ -100,8 +100,10 @@
 
 //!Phase Space File parameters
 //! MAXIMUM HISTORIES TO STORE IN THE PSF and number of Volumes of Interest
-#define  MAXPSFHIST 2000000
+#define  MAXPSFHIST 4000000
 #define MAXPSFVOI 5
+#define PSF_MODE_DETECTOR_PLANE 1
+#define PSF_STREAM_TARGET_HIST 3000000
 
 
 // Include standard header files:
@@ -150,6 +152,13 @@ __constant__ float density_LUT_CONST[MAX_MATERIALS];    // !!inputDensity!! Dens
 
 struct EdgeVectors {
     std::vector<float> x, y, z;
+};
+
+struct psf_stream_state
+{
+  bool initialized;
+  unsigned long long int written;
+  unsigned long long int overflow;
 };
 
 
@@ -310,13 +319,14 @@ struct
 #endif
 psf_struct
 {
-  float3 psfdir[MAXPSFHIST*MAXPSFVOI],
-         psfpos[MAXPSFVOI*MAXPSFHIST];
-  float  psfener[MAXPSFVOI*MAXPSFHIST];
+  float3 psfdir[MAXPSFHIST],
+         psfpos[MAXPSFHIST];
+  float  psfener[MAXPSFHIST];
   short3 voxindex[MAXPSFVOI];
   unsigned long long int psf_total[MAXPSFVOI];
   bool state;
   char psf_voi;
+  char mode;
 };
 
 
@@ -336,7 +346,7 @@ void update_seed_PRNG(int batch_number, unsigned long long int total_histories, 
 void IRND0(float *W, float *F, short int *K, int N);
 int report_materials_dose(int num_projections, unsigned long long int total_histories, float *density_nominal, ulonglong2 *materials_dose, double *mass_materials, char file_name_materials[MAX_MATERIALS][250]);
 // PHASE SPACE FILE REPORT
-int report_psf(const char* file_name_output, struct psf_struct* psf_data, const struct voxel_struct* voxel_data, const EdgeVectors& E);
+int report_psf(const char* file_name_output, struct psf_struct* psf_data, const struct voxel_struct* voxel_data, const EdgeVectors& E, unsigned long long int total_histories);
 
 
 // #ifdef USING_CUDA
@@ -415,6 +425,11 @@ void track_particles(int history_batch, int histories_per_thread, short int num_
 __device__
 #endif
 inline void tally_image(float* energy, float3* position, float3* direction, signed char* scatter_state, unsigned long long int* image, struct source_struct* source_data_SHARED, struct detector_struct* detector_data_SHARED, int2* seed);       //!!detectorModel!!
+
+#ifdef USING_CUDA
+__device__
+#endif
+inline void tally_psf_detector_plane(float energy, const float3* position, const float3* direction, signed char scatter_state, struct psf_struct* psf_data, struct detector_struct* detector_data_SHARED);
 
 #ifdef USING_CUDA
 __device__

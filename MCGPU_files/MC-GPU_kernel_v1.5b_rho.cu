@@ -242,16 +242,9 @@ __global__ void track_particles(int histories_per_thread,
   __shared__  struct detector_struct detector_data_SHARED;
   __shared__  struct source_struct source_data_SHARED;
 
- //test psf shared memory
-  __shared__ short3* psfvoxindex_shared[MAXPSFVOI];
   __shared__ bool psf_state_shared;
-  __shared__ char psf_voi_shared;
+  __shared__ char psf_mode_shared;
 
-  float spsf;
-  unsigned long long int psflocal;
-  char voit; // variable only used for psf
-
-    
 #ifdef USING_CUDA
   if (0==threadIdx.x)  // First GPU thread copies the variables to shared memory
   {
@@ -272,15 +265,8 @@ __global__ void track_particles(int histories_per_thread,
     cgco_SHARED = *compton_table;
 
 
-    // -Copy PSF data to shared memory
-
 	psf_state_shared = psf_data->state;
-	psf_voi_shared = psf_data->psf_voi;
-	
-	for(voit=0; voit<psf_voi_shared; voit++)
-	{
-		psfvoxindex_shared[voit] = &psf_data->voxindex[voit];
-	}
+	psf_mode_shared = psf_data->mode;
     
 #ifdef USING_CUDA
   }
@@ -354,34 +340,6 @@ __global__ void track_particles(int histories_per_thread,
       {     
 
         step = -(mfp_Woodcock)*logf(ranecu(&seed));   // Using the minimum MFP in the geometry for the input energy (Woodcock tracking)
-
-
-		// START PHASE SPACE FILE CHECK
-		if (psf_state_shared){
-
-		
-		 for(voit=0; voit<psf_voi_shared; voit++)
-		 {
-   	          spsf = voxel_intercept_non_uniform(gp, psfvoxindex_shared[voit], &position, &direction, &step); //step until intercepts
-		  if (spsf>0)
-		  {
-		      if (psf_data->psf_total[voit]<MAXPSFHIST){ //prevents overflow of the index
-			  psflocal = atomicAdd(&psf_data->psf_total[voit], ((unsigned long long )1));
-			  atomicExch(&psf_data->psfdir[psflocal + MAXPSFHIST*voit].x, direction.x); //add direction x to the psf vector
-			  atomicExch(&psf_data->psfdir[psflocal + MAXPSFHIST*voit].y, direction.y); //add direction y to the psf vector
-			  atomicExch(&psf_data->psfdir[psflocal + MAXPSFHIST*voit].z, direction.z); //add direction z to the psf vector
-			  atomicExch(&psf_data->psfpos[psflocal + MAXPSFHIST*voit].x, position.x + direction.x*spsf); //add position x to the psf vector
-			  atomicExch(&psf_data->psfpos[psflocal + MAXPSFHIST*voit].y, position.y+ direction.y*spsf); //add position y to the psf vector
-			  atomicExch(&psf_data->psfpos[psflocal + MAXPSFHIST*voit].z, position.z+ direction.z*spsf); //add position z to the psf vector
-			  atomicExch(&psf_data->psfener[psflocal + MAXPSFHIST*voit], energy); //add energy to the psf vector
-			
-			  }
-			
-          }	
-		 }
-		}
-		
-		//  END PHASE SPACE FILE CHECK
 
         position.x += step*direction.x;
         position.y += step*direction.y;
@@ -547,6 +505,9 @@ __global__ void track_particles(int histories_per_thread,
     if (index>-1)
     {
       // -- Particle escaped the voxels but was not absorbed, check if it will arrive at the detector and tally its energy:      
+      if (psf_state_shared && psf_mode_shared == PSF_MODE_DETECTOR_PLANE)
+        tally_psf_detector_plane(energy, &position, &direction, scatter_state, psf_data, &detector_data_SHARED);
+
       tally_image(&energy, &position, &direction, &scatter_state, image, &source_data_SHARED, &detector_data_SHARED, &seed);    //!!detectorModel!!
 
     }
@@ -1751,6 +1712,59 @@ inline float density_LUT(int material)                                          
 //!  Tally a radiographic projection image using a detector layer with the input thickness and material composition.
 //!  This model will reproduce the geometric spreading of the point spread function and the real detector transmission.
 ////////////////////////////////////////////////////////////////////////////////
+#ifdef USING_CUDA
+__device__
+#endif
+inline void tally_psf_detector_plane(float energy, const float3* position, const float3* direction, signed char scatter_state, struct psf_struct* psf_data, struct detector_struct* detector_data_SHARED)
+{
+  (void)scatter_state;
+
+  float3 pos_det = *position;
+  float3 dir_det = *direction;
+
+  pos_det.x -= detector_data_SHARED->center.x;
+  pos_det.y -= detector_data_SHARED->center.y;
+  pos_det.z -= detector_data_SHARED->center.z;
+
+  apply_rotation(&dir_det, detector_data_SHARED->rot_inv);
+  apply_rotation(&pos_det, detector_data_SHARED->rot_inv);
+
+  if (dir_det.y < 0.0175f)
+    return;
+
+  const float dist_detector = -pos_det.y / dir_det.y;
+  if (dist_detector < 0.0f)
+    return;
+
+  const float hit_x_det = pos_det.x + dist_detector * dir_det.x;
+  const float hit_z_det = pos_det.z + dist_detector * dir_det.z;
+
+  const int pixel_coord_x = (int)floorf((hit_x_det - detector_data_SHARED->offset.x + 0.5f * detector_data_SHARED->width_X) * detector_data_SHARED->inv_pixel_size_X);
+  if (pixel_coord_x < 0 || pixel_coord_x >= detector_data_SHARED->num_pixels.x)
+    return;
+
+  const int pixel_coord_z = (int)floorf((hit_z_det - detector_data_SHARED->offset.y + 0.5f * detector_data_SHARED->height_Z) * detector_data_SHARED->inv_pixel_size_Z);
+  if (pixel_coord_z < 0 || pixel_coord_z >= detector_data_SHARED->num_pixels.y)
+    return;
+
+  unsigned long long int slot;
+#ifdef USING_CUDA
+  slot = atomicAdd(&psf_data->psf_total[0], (unsigned long long int)1);
+#else
+  slot = psf_data->psf_total[0]++;
+#endif
+  if (slot >= (unsigned long long int)MAXPSFHIST)
+    return;
+
+  psf_data->psfpos[slot].x = position->x + dist_detector * direction->x;
+  psf_data->psfpos[slot].y = position->y + dist_detector * direction->y;
+  psf_data->psfpos[slot].z = position->z + dist_detector * direction->z;
+  psf_data->psfdir[slot].x = direction->x;
+  psf_data->psfdir[slot].y = direction->y;
+  psf_data->psfdir[slot].z = direction->z;
+  psf_data->psfener[slot] = energy;
+}
+
 #ifdef USING_CUDA
 __device__
 #endif
