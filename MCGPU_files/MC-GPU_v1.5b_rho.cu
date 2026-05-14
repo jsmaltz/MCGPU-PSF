@@ -4869,8 +4869,8 @@ static int report_psf_iaea(const char* file_name_output,
     return -3;
   }
 
-  IAEA_I32 n_extra_float = 0;
-  IAEA_I32 n_extra_int = 0;
+  IAEA_I32 n_extra_float = 1;   // fractional MU / projection index; 0 for single-field MC-GPU output
+  IAEA_I32 n_extra_int = 1;     // latch: 0 primary, 1 Compton, 2 Rayleigh, 3 multiple scatter
   iaea_set_extra_numbers(&source_write, &n_extra_float, &n_extra_int);
 
   IAEA_I64 n_original = (IAEA_I64)total_histories;
@@ -4893,6 +4893,7 @@ static int report_psf_iaea(const char* file_name_output,
     IAEA_Float u = (IAEA_Float)psf_data->psfdir[i].x;
     IAEA_Float v = (IAEA_Float)psf_data->psfdir[i].y;
     IAEA_Float w = (IAEA_Float)psf_data->psfdir[i].z;
+    extra_ints[0] = (IAEA_I32)psf_data->psflatch[i];
 
     iaea_write_particle(&source_write, &n_stat, &type, &e, &wt, &x, &y, &z, &u, &v, &w, extra_floats, extra_ints);
   }
@@ -5016,6 +5017,10 @@ static int copy_psf_chunk_from_device(struct psf_struct* psf_data,
   checkCudaErrors(cudaMemcpy(psf_data->psfener,
                              (char*)psf_data_device + offsetof(struct psf_struct, psfener),
                              (size_t)n * sizeof(float),
+                             cudaMemcpyDeviceToHost));
+  checkCudaErrors(cudaMemcpy(psf_data->psflatch,
+                             (char*)psf_data_device + offsetof(struct psf_struct, psflatch),
+                             (size_t)n * sizeof(signed char),
                              cudaMemcpyDeviceToHost));
   return 0;
 }

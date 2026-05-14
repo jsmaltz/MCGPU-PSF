@@ -322,6 +322,7 @@ psf_struct
   float3 psfdir[MAXPSFHIST],
          psfpos[MAXPSFHIST];
   float  psfener[MAXPSFHIST];
+  signed char psflatch[MAXPSFHIST];
   unsigned long long int psf_total[MAXPSFVOI];
   bool state;
   char mode;

@@ -1717,8 +1717,6 @@ __device__
 #endif
 inline void tally_psf_detector_plane(float energy, const float3* position, const float3* direction, signed char scatter_state, struct psf_struct* psf_data, struct detector_struct* detector_data_SHARED)
 {
-  (void)scatter_state;
-
   float3 pos_det = *position;
   float3 dir_det = *direction;
 
@@ -1763,6 +1761,7 @@ inline void tally_psf_detector_plane(float energy, const float3* position, const
   psf_data->psfdir[slot].y = direction->y;
   psf_data->psfdir[slot].z = direction->z;
   psf_data->psfener[slot] = energy;
+  psf_data->psflatch[slot] = scatter_state;
 }
 
 #ifdef USING_CUDA
