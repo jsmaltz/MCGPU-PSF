@@ -322,10 +322,8 @@ psf_struct
   float3 psfdir[MAXPSFHIST],
          psfpos[MAXPSFHIST];
   float  psfener[MAXPSFHIST];
-  short3 voxindex[MAXPSFVOI];
   unsigned long long int psf_total[MAXPSFVOI];
   bool state;
-  char psf_voi;
   char mode;
 };
 

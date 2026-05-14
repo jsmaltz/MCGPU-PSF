@@ -2725,29 +2725,12 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
   ////////////////////////////// PHASE SPACE FILE SECTION ////////////////////////////////////////////////////////////////////////////////////
   
   
-  new_line_ptr = fgets_trimmed(new_line, 250, file_ptr);   // TALLY 3D PSF Voxel? [YES/NO] 
+  new_line_ptr = fgets_trimmed(new_line, 250, file_ptr);   // WRITE DETECTOR-PLANE PHASE SPACE? [YES/NO]
 
   if (0==strncmp("YE",new_line,2) || 0==strncmp("Ye",new_line,2) || 0==strncmp("ye",new_line,2))
   {
     // -- YES: score photons crossing the detector plane.
     psf_data->state = true;
-	new_line_ptr = fgets_trimmed(new_line, 250, file_ptr); sscanf(new_line, "%hhd", &psf_data->psf_voi);   // # NUMBER OF  VOXELS TO TALLY PSF
-	if (psf_data->psf_voi>MAXPSFVOI)
-	{
-		MAIN_THREAD printf("\n\n   !!read_input ERROR!! Number of PSF VOIS higher than the maximum declared in the compiler .\n");
-		exit(-2);
-	}
-	
-	//hardcoded to look for 5 inputs max, for this moment
-		
-    new_line_ptr = fgets_trimmed(new_line, 250, file_ptr); sscanf(new_line, "%hd %hd %hd %hd %hd", 
-	&psf_data->voxindex[0].x, &psf_data->voxindex[1].x, &psf_data->voxindex[2].x, &psf_data->voxindex[3].x, &psf_data->voxindex[4].x);   // # VOXELS TO TALLY PSF: X-index (first voxel has index 0)
-    new_line_ptr = fgets_trimmed(new_line, 250, file_ptr); sscanf(new_line, "%hd %hd %hd %hd %hd", 
-	&psf_data->voxindex[0].y, &psf_data->voxindex[1].y, &psf_data->voxindex[2].y, &psf_data->voxindex[3].y, &psf_data->voxindex[4].y);   // # VOXELS TO TALLY PSF: Y-index (first voxel has index 0)
-    new_line_ptr = fgets_trimmed(new_line, 250, file_ptr); sscanf(new_line, "%hd %hd %hd %hd %hd", 
-	&psf_data->voxindex[0].z, &psf_data->voxindex[1].z, &psf_data->voxindex[2].z, &psf_data->voxindex[3].z, &psf_data->voxindex[4].z);   // # VOXELS TO TALLY PSF: Z-index (first voxel has index 0)
-
-    psf_data->psf_voi = 1;
     psf_data->mode = PSF_MODE_DETECTOR_PLANE;
     for (int ipsf = 0; ipsf < MAXPSFVOI; ++ipsf) psf_data->psf_total[ipsf] = 0;
 
@@ -2758,7 +2741,6 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
   {
     // -- NO: disabling tally
 	psf_data->state = false;
-    psf_data->psf_voi = 0;
     psf_data->mode = 0;
     MAIN_THREAD printf("       Phase-space tally DISABLED.\n");
   }
@@ -5055,51 +5037,41 @@ int report_psf(const char* file_name_output,
                unsigned long long int total_histories)
 {
   if (!psf_data || !psf_data->state) return 0;
+  (void)voxel_data;
+  (void)E;
 
   char file_txt[250];
   char file_raw[250];
-  const bool detector_plane_mode = (psf_data->mode == PSF_MODE_DETECTOR_PLANE);
-  const int num_outputs = detector_plane_mode ? 1 : (int)psf_data->psf_voi;
 
-  // Write per-VOI raw files
-  for (int voi = 0; voi < num_outputs; voi++)
+  if (psf_data->mode != PSF_MODE_DETECTOR_PLANE)
+    return 0;
+
+  snprintf(file_raw, sizeof(file_raw), "%s_psf.raw", file_name_output);
+  FILE* fp = fopen(file_raw, "wb");
+  if (!fp)
   {
-    if (detector_plane_mode)
-      snprintf(file_raw, sizeof(file_raw), "%s_psf.raw", file_name_output);
-    else
-      snprintf(file_raw, sizeof(file_raw), "%s_%d_psf.raw", file_name_output, voi + 1);
-
-    FILE* fp = fopen(file_raw, "wb");
-    if (!fp)
-    {
-      printf("\n\n   !!fopen ERROR report_psf!! Binary file %s can not be opened for writing!!\n", file_raw);
-      return -3;
-    }
-
-    const unsigned long long base = (unsigned long long)MAXPSFHIST * (unsigned long long)voi;
-    const unsigned long long recorded = psf_data->psf_total[voi];
-    const unsigned long long n = (recorded > (unsigned long long)MAXPSFHIST) ? (unsigned long long)MAXPSFHIST : recorded;
-
-    for (unsigned long long i = 0; i < n; i++)
-    {
-      const unsigned long long idx = base + i;
-
-      fwrite(&psf_data->psfpos[idx].x, sizeof(float), 1, fp);
-      fwrite(&psf_data->psfpos[idx].y, sizeof(float), 1, fp);
-      fwrite(&psf_data->psfpos[idx].z, sizeof(float), 1, fp);
-
-      fwrite(&psf_data->psfdir[idx].x, sizeof(float), 1, fp);
-      fwrite(&psf_data->psfdir[idx].y, sizeof(float), 1, fp);
-      fwrite(&psf_data->psfdir[idx].z, sizeof(float), 1, fp);
-
-      fwrite(&psf_data->psfener[idx], sizeof(float), 1, fp);
-    }
-
-    fclose(fp);
+    printf("\n\n   !!fopen ERROR report_psf!! Binary file %s can not be opened for writing!!\n", file_raw);
+    return -3;
   }
 
-  if (detector_plane_mode)
-    report_psf_iaea(file_name_output, psf_data, total_histories, false);
+  const unsigned long long recorded = psf_data->psf_total[0];
+  const unsigned long long n = (recorded > (unsigned long long)MAXPSFHIST) ? (unsigned long long)MAXPSFHIST : recorded;
+
+  for (unsigned long long i = 0; i < n; i++)
+  {
+    fwrite(&psf_data->psfpos[i].x, sizeof(float), 1, fp);
+    fwrite(&psf_data->psfpos[i].y, sizeof(float), 1, fp);
+    fwrite(&psf_data->psfpos[i].z, sizeof(float), 1, fp);
+
+    fwrite(&psf_data->psfdir[i].x, sizeof(float), 1, fp);
+    fwrite(&psf_data->psfdir[i].y, sizeof(float), 1, fp);
+    fwrite(&psf_data->psfdir[i].z, sizeof(float), 1, fp);
+
+    fwrite(&psf_data->psfener[i], sizeof(float), 1, fp);
+  }
+
+  fclose(fp);
+  report_psf_iaea(file_name_output, psf_data, total_histories, false);
 
   // Summary text
   snprintf(file_txt, sizeof(file_txt), "%s_psf.txt", file_name_output);
@@ -5110,62 +5082,11 @@ int report_psf(const char* file_name_output,
     return -3;
   }
 
-  if (detector_plane_mode)
-  {
-    const unsigned long long recorded = psf_data->psf_total[0];
-    const unsigned long long n = (recorded > (unsigned long long)MAXPSFHIST) ? (unsigned long long)MAXPSFHIST : recorded;
-    fprintf(ft, "Detector-plane phase-space tally\n");
-    fprintf(ft, "N %llu\n", (unsigned long long)n);
-    if (recorded > (unsigned long long)MAXPSFHIST)
-      fprintf(ft, "N_OVERFLOW %llu\n", (unsigned long long)(recorded - (unsigned long long)MAXPSFHIST));
-    psf_data->psf_total[0] = 0;
-    fclose(ft);
-    return 0;
-  }
-
-  // Helper: center coordinate from edges + offset.
-  // NOTE: assumes E.*_edges_cm are in cm and indices are 0-based voxel indices.
-  auto center_x_cm = [&](int ix) -> double {
-    return 0.5 * ((double)E.x[ix] + (double)E.x[ix + 1]) + (double)voxel_data->offset.x;
-  };
-  auto center_y_cm = [&](int iy) -> double {
-    return 0.5 * ((double)E.y[iy] + (double)E.y[iy + 1]) + (double)voxel_data->offset.y;
-  };
-  auto center_z_cm = [&](int iz) -> double {
-    return 0.5 * ((double)E.z[iz] + (double)E.z[iz + 1]) + (double)voxel_data->offset.z;
-  };
-
-  fprintf(ft, "VOI coordinates (cm)\n");
-
-  fprintf(ft, "X");
-  for (int voi = 0; voi < (int)psf_data->psf_voi; voi++)
-  {
-    const int ix = (int)psf_data->voxindex[voi].x;  // assume 0-based
-    fprintf(ft, " %.4lf", center_x_cm(ix));
-  }
-
-  fprintf(ft, "\nY");
-  for (int voi = 0; voi < (int)psf_data->psf_voi; voi++)
-  {
-    const int iy = (int)psf_data->voxindex[voi].y;
-    fprintf(ft, " %.4lf", center_y_cm(iy));
-  }
-
-  fprintf(ft, "\nZ");
-  for (int voi = 0; voi < (int)psf_data->psf_voi; voi++)
-  {
-    const int iz = (int)psf_data->voxindex[voi].z;
-    fprintf(ft, " %.4lf", center_z_cm(iz));
-  }
-
-  fprintf(ft, "\nN");
-  for (int voi = 0; voi < (int)psf_data->psf_voi; voi++)
-  {
-    fprintf(ft, " %llu", (unsigned long long)psf_data->psf_total[voi]);
-    psf_data->psf_total[voi] = 0;   // reset here if desired
-  }
-
-  fprintf(ft, "\n");
+  fprintf(ft, "Detector-plane phase-space tally\n");
+  fprintf(ft, "N %llu\n", (unsigned long long)n);
+  if (recorded > (unsigned long long)MAXPSFHIST)
+    fprintf(ft, "N_OVERFLOW %llu\n", (unsigned long long)(recorded - (unsigned long long)MAXPSFHIST));
+  psf_data->psf_total[0] = 0;
   fclose(ft);
 
   return 0;

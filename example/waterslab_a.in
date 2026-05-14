@@ -50,11 +50,7 @@ images/mc-gpu_dose.dat          # OUTPUT VOXEL DOSE FILE NAME
   1  6                        # VOXEL DOSE ROI: X-index min max (first voxel has index 1)
   1  6                        # VOXEL DOSE ROI: Y-index min max
   1  4                        # VOXEL DOSE ROI: Z-index min max
-NO                            # TALLY Phase Space Files? [YES/NO] (PSF for each selected voxel)
-  3		               #NUMBER OF PSF VOIS TO TALLY (Max 5 by default)
-  140 140 140 80 80            #VOXEL PSF X-INDEX (starts with 0) for each VOI
-  260 260 260 180 3            #VOXEL PSF Y-INDEX (starts with 0)
-  50 20 80  53 53              #VOXEL PSF Z-INXED (starts with 0)
+NO                            # WRITE DETECTOR-PLANE PHASE SPACE? [YES/NO]
  
 #[SECTION VOXELIZED GEOMETRY FILE v.2017-07-26]
 phantoms/waterslabstandalone_a.vox.gz   # VOXEL GEOMETRY FILE (penEasy 2008 format; .gz accepted)

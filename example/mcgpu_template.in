@@ -49,11 +49,7 @@ dataset.image_path             # OUTPUT VOXEL DOSE FILE NAME was images/mc-gpu_d
 dataset.voxel_dose_roi.x        # VOXEL DOSE ROI: X-index min max (first voxel has index 1) was:   1  6 
 dataset.voxel_dose_roi.y         # VOXEL DOSE ROI: Y-index min max was   1  6 
 dataset.voxel_dose_roi.z       # VOXEL DOSE ROI: Z-index min max   1  4 
-dataset.tally_phase_space.flag   # TALLY Phase Space Files? [YES/NO] (PSF for each selected voxel) was NO
-dataset.tally_phase_space.N      # NUMBER OF PSF VOIS TO TALLY (Max 5 by default) was 3
-dataset.tally_phase_space.ind_x  # VOXEL PSF X-INDEX (starts with 0) for each VOI was  140 140 140 80 80      
-dataset.tally_phase_space.ind_y  # VOXEL PSF Y-INDEX (starts with 0) was  260 260 260 180 3  
-dataset.tally_phase_space.ind_z  # VOXEL PSF Z-INXED (starts with 0) was  50 20 80  53 53   
+dataset.tally_phase_space.flag   # WRITE DETECTOR-PLANE PHASE SPACE? [YES/NO] was NO
  
 #[SECTION VOXELIZED GEOMETRY FILE v.2017-07-26]
 dataset.voxel_geom_path   # VOXEL GEOMETRY FILE (penEasy 2008 format; .gz accepted) was phantoms/waterslabstandalone_a.vox.gz 
