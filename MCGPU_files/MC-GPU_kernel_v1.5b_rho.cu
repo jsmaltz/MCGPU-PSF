@@ -301,6 +301,7 @@ __global__ void track_particles(int histories_per_thread,
         
 
     scatter_state = (signed char)0;     // Reset previous scatter state: new non-scattered particle loaded
+    bool psf_recorded = false;
 
     // -- Find the current energy bin by truncation (this could be pre-calculated for a monoenergetic beam):    
     //    The initialization host code made sure that the sampled energy will always be within the tabulated energies (index never negative or too large).
@@ -341,9 +342,13 @@ __global__ void track_particles(int histories_per_thread,
 
         step = -(mfp_Woodcock)*logf(ranecu(&seed));   // Using the minimum MFP in the geometry for the input energy (Woodcock tracking)
 
+        float3 position_old = position;
         position.x += step*direction.x;
         position.y += step*direction.y;
         position.z += step*direction.z;
+
+        if (psf_state_shared && psf_mode_shared == PSF_MODE_DETECTOR_PLANE && !psf_recorded)
+          psf_recorded = tally_psf_detector_plane_crossing(energy, &position_old, &position, &direction, scatter_state, psf_data, &detector_data_SHARED);
 
  
         // -- Locate the new particle in the voxel geometry:      
@@ -505,7 +510,7 @@ __global__ void track_particles(int histories_per_thread,
     if (index>-1)
     {
       // -- Particle escaped the voxels but was not absorbed, check if it will arrive at the detector and tally its energy:      
-      if (psf_state_shared && psf_mode_shared == PSF_MODE_DETECTOR_PLANE)
+      if (psf_state_shared && psf_mode_shared == PSF_MODE_DETECTOR_PLANE && !psf_recorded)
         tally_psf_detector_plane(energy, &position, &direction, scatter_state, psf_data, &detector_data_SHARED);
 
       tally_image(&energy, &position, &direction, &scatter_state, image, &source_data_SHARED, &detector_data_SHARED, &seed);    //!!detectorModel!!
@@ -1715,7 +1720,7 @@ inline float density_LUT(int material)                                          
 #ifdef USING_CUDA
 __device__
 #endif
-inline void tally_psf_detector_plane(float energy, const float3* position, const float3* direction, signed char scatter_state, struct psf_struct* psf_data, struct detector_struct* detector_data_SHARED)
+inline bool tally_psf_detector_plane(float energy, const float3* position, const float3* direction, signed char scatter_state, struct psf_struct* psf_data, struct detector_struct* detector_data_SHARED)
 {
   float3 pos_det = *position;
   float3 dir_det = *direction;
@@ -1728,22 +1733,22 @@ inline void tally_psf_detector_plane(float energy, const float3* position, const
   apply_rotation(&pos_det, detector_data_SHARED->rot_inv);
 
   if (dir_det.y < 0.0175f)
-    return;
+    return false;
 
   const float dist_detector = -pos_det.y / dir_det.y;
   if (dist_detector < 0.0f)
-    return;
+    return false;
 
   const float hit_x_det = pos_det.x + dist_detector * dir_det.x;
   const float hit_z_det = pos_det.z + dist_detector * dir_det.z;
 
   const int pixel_coord_x = (int)floorf((hit_x_det - detector_data_SHARED->offset.x + 0.5f * detector_data_SHARED->width_X) * detector_data_SHARED->inv_pixel_size_X);
   if (pixel_coord_x < 0 || pixel_coord_x >= detector_data_SHARED->num_pixels.x)
-    return;
+    return false;
 
   const int pixel_coord_z = (int)floorf((hit_z_det - detector_data_SHARED->offset.y + 0.5f * detector_data_SHARED->height_Z) * detector_data_SHARED->inv_pixel_size_Z);
   if (pixel_coord_z < 0 || pixel_coord_z >= detector_data_SHARED->num_pixels.y)
-    return;
+    return false;
 
   unsigned long long int slot;
 #ifdef USING_CUDA
@@ -1752,7 +1757,7 @@ inline void tally_psf_detector_plane(float energy, const float3* position, const
   slot = psf_data->psf_total[0]++;
 #endif
   if (slot >= (unsigned long long int)MAXPSFHIST)
-    return;
+    return false;
 
   psf_data->psfpos[slot].x = position->x + dist_detector * direction->x;
   psf_data->psfpos[slot].y = position->y + dist_detector * direction->y;
@@ -1762,6 +1767,72 @@ inline void tally_psf_detector_plane(float energy, const float3* position, const
   psf_data->psfdir[slot].z = direction->z;
   psf_data->psfener[slot] = energy;
   psf_data->psflatch[slot] = scatter_state;
+  return true;
+}
+
+#ifdef USING_CUDA
+__device__
+#endif
+inline bool tally_psf_detector_plane_crossing(float energy, const float3* position0, const float3* position1, const float3* direction, signed char scatter_state, struct psf_struct* psf_data, struct detector_struct* detector_data_SHARED)
+{
+  float3 pos0_det = *position0;
+  float3 pos1_det = *position1;
+  float3 dir_det = *direction;
+
+  pos0_det.x -= detector_data_SHARED->center.x;
+  pos0_det.y -= detector_data_SHARED->center.y;
+  pos0_det.z -= detector_data_SHARED->center.z;
+  pos1_det.x -= detector_data_SHARED->center.x;
+  pos1_det.y -= detector_data_SHARED->center.y;
+  pos1_det.z -= detector_data_SHARED->center.z;
+
+  apply_rotation(&dir_det, detector_data_SHARED->rot_inv);
+  apply_rotation(&pos0_det, detector_data_SHARED->rot_inv);
+  apply_rotation(&pos1_det, detector_data_SHARED->rot_inv);
+
+  if (dir_det.y < 0.0175f)
+    return false;
+
+  const float dy = pos1_det.y - pos0_det.y;
+  if (dy <= 0.0f)
+    return false;
+
+  if (pos0_det.y > 0.0f || pos1_det.y < 0.0f)
+    return false;
+
+  const float frac = -pos0_det.y / dy;
+  if (frac < 0.0f || frac > 1.0f)
+    return false;
+
+  const float hit_x_det = pos0_det.x + frac * (pos1_det.x - pos0_det.x);
+  const float hit_z_det = pos0_det.z + frac * (pos1_det.z - pos0_det.z);
+
+  const int pixel_coord_x = (int)floorf((hit_x_det - detector_data_SHARED->offset.x + 0.5f * detector_data_SHARED->width_X) * detector_data_SHARED->inv_pixel_size_X);
+  if (pixel_coord_x < 0 || pixel_coord_x >= detector_data_SHARED->num_pixels.x)
+    return false;
+
+  const int pixel_coord_z = (int)floorf((hit_z_det - detector_data_SHARED->offset.y + 0.5f * detector_data_SHARED->height_Z) * detector_data_SHARED->inv_pixel_size_Z);
+  if (pixel_coord_z < 0 || pixel_coord_z >= detector_data_SHARED->num_pixels.y)
+    return false;
+
+  unsigned long long int slot;
+#ifdef USING_CUDA
+  slot = atomicAdd(&psf_data->psf_total[0], (unsigned long long int)1);
+#else
+  slot = psf_data->psf_total[0]++;
+#endif
+  if (slot >= (unsigned long long int)MAXPSFHIST)
+    return false;
+
+  psf_data->psfpos[slot].x = position0->x + frac * (position1->x - position0->x);
+  psf_data->psfpos[slot].y = position0->y + frac * (position1->y - position0->y);
+  psf_data->psfpos[slot].z = position0->z + frac * (position1->z - position0->z);
+  psf_data->psfdir[slot].x = direction->x;
+  psf_data->psfdir[slot].y = direction->y;
+  psf_data->psfdir[slot].z = direction->z;
+  psf_data->psfener[slot] = energy;
+  psf_data->psflatch[slot] = scatter_state;
+  return true;
 }
 
 #ifdef USING_CUDA

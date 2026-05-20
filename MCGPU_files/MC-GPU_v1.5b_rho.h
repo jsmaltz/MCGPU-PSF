@@ -428,7 +428,11 @@ inline void tally_image(float* energy, float3* position, float3* direction, sign
 #ifdef USING_CUDA
 __device__
 #endif
-inline void tally_psf_detector_plane(float energy, const float3* position, const float3* direction, signed char scatter_state, struct psf_struct* psf_data, struct detector_struct* detector_data_SHARED);
+inline bool tally_psf_detector_plane(float energy, const float3* position, const float3* direction, signed char scatter_state, struct psf_struct* psf_data, struct detector_struct* detector_data_SHARED);
+#ifdef USING_CUDA
+__device__
+#endif
+inline bool tally_psf_detector_plane_crossing(float energy, const float3* position0, const float3* position1, const float3* direction, signed char scatter_state, struct psf_struct* psf_data, struct detector_struct* detector_data_SHARED);
 
 #ifdef USING_CUDA
 __device__
