@@ -689,7 +689,13 @@ int main(int argc, char **argv)
           printf("      Computed antiscatter grid height = %f cm (=%.2f micron)\n", h, 1.0e4*h);
           printf("         strips average mean free path = %f cm\n", 1.0f/detector_data[0].grid_strip_mu);
           printf("     interspace average mean free path = %f cm\n", 1.0f/detector_data[0].grid_interspace_mu);
-          
+          if (detector_data[0].grid_strip_material >= 0)
+            printf("           ASG material table indices = strip %d, interspace %d (1-based input: %d, %d)\n",
+              detector_data[0].grid_strip_material, detector_data[0].grid_interspace_material,
+              detector_data[0].grid_strip_material+1, detector_data[0].grid_interspace_material+1);
+          else
+            printf("           ASG attenuation mode = scalar mean free paths from input\n");
+
           if (detector_data[0].grid_ratio<0.0f)
             printf("          Antiscatter grid orientation = 0 --> 1D collimated grid with strips perpendicular to lateral direction (mammo style)\n");
           else
@@ -914,7 +920,7 @@ int main(int argc, char **argv)
   
   
   // *** Read the material mean free paths and set the interaction table in a "linear_interp" structure:
-  load_material(myID, file_name_materials, density_max, density_nominal, &mfp_table_data, &mfp_Woodcock_table, &mfp_Woodcock_table_bytes, &mfp_table_a, &mfp_table_b, &mfp_table_bytes, &rayleigh_table, &compton_table);
+  load_material(myID, file_name_materials, density_max, density_nominal, detector_data, &mfp_table_data, &mfp_Woodcock_table, &mfp_Woodcock_table_bytes, &mfp_table_a, &mfp_table_b, &mfp_table_bytes, &rayleigh_table, &compton_table);
 
   // -- Check that the input material tables and the x-ray source are consistent:
   if ( (source_energy_data.espc[0] < mfp_table_data.e0) || (source_energy_data.espc[source_energy_data.num_bins_espc] > (mfp_table_data.e0 + (mfp_table_data.num_values-1)/mfp_table_data.ide)) )
@@ -2433,19 +2439,38 @@ void read_input(int argc, char** argv, int myID, unsigned long long int* total_h
     
   float grid_strip_MFP=-1.0f, grid_interspace_MFP=-1.0f;
   int grid_orientation=99;
+  int grid_strip_material=0, grid_interspace_material=0;
   new_line_ptr = fgets_trimmed(new_line, 400, file_ptr);
     sscanf(new_line, "%f %f %f", &detector_data[0].grid_ratio, &detector_data[0].grid_freq, &detector_data[0].grid_strip_thickness);   // ANTISCATTER GRID RATIO, FREQUENCY, STRIP THICKNESS [X:1, lp/cm, cm]       !!DBTv1.5!!
   new_line_ptr = fgets_trimmed(new_line, 400, file_ptr);
-    sscanf(new_line, "%f %f", &grid_strip_MFP, &grid_interspace_MFP);       // ANTISCATTER STRIPS AND INTERSPACE MEAN FREE PATHS AT MEAN ENERGY [cm]             !!DBTv1.5!!
+    int grid_material_count = sscanf(new_line, "%f %f %d %d", &grid_strip_MFP, &grid_interspace_MFP, &grid_strip_material, &grid_interspace_material);       // ANTISCATTER STRIPS AND INTERSPACE MEAN FREE PATHS AT MEAN ENERGY [cm], optionally followed by 1-based ASG material indices             !!DBTv1.5!!
   new_line_ptr = fgets_trimmed(new_line, 400, file_ptr);
     sscanf(new_line, "%d", &grid_orientation);                              // ORIENTATION 1D FOCUSED ANTISCATTER GRID LINES: 0==STRIPS PERPENDICULAR LATERAL DIRECTION (mammo style); 1==STRIPS PARALLEL LATERAL DIRECTION (DBT style)      !!DBTv1.5!! 
 
   detector_data[0].grid_strip_mu = 1.0f/grid_strip_MFP;                     // Store the coefficients of attenuation for the attenuating strips and the interspace material [1/cm]
   detector_data[0].grid_interspace_mu = 1.0f/grid_interspace_MFP;
+  detector_data[0].grid_strip_material = -1;
+  detector_data[0].grid_interspace_material = -1;
+  if (grid_material_count >= 4)
+  {
+    detector_data[0].grid_strip_material = grid_strip_material - 1;
+    detector_data[0].grid_interspace_material = grid_interspace_material - 1;
+    if (detector_data[0].grid_strip_material < 0 || detector_data[0].grid_strip_material >= MAX_MATERIALS ||
+        detector_data[0].grid_interspace_material < 0 || detector_data[0].grid_interspace_material >= MAX_MATERIALS)
+    {
+      MAIN_THREAD printf("\n\n   !!read_input ERROR!! Incorrect ASG material indices. Use 1-based material numbers in [1,%d]. Input strip=%d, interspace=%d!!\n\n", MAX_MATERIALS, grid_strip_material, grid_interspace_material);
+      #ifdef USING_MPI
+        MPI_Finalize();
+      #endif
+      exit(-2);
+    }
+  }
   
   if (detector_data[0].grid_ratio<1e-7f || detector_data[0].grid_freq<1e-7f || detector_data[0].grid_strip_thickness<2e-8f)
   {
     detector_data[0].grid_freq = -1.0f;    // Signal that the grid is disabled
+    detector_data[0].grid_strip_material = -1;
+    detector_data[0].grid_interspace_material = -1;
   } 
   
   if (0==grid_orientation)
@@ -3450,7 +3475,7 @@ void load_voxels(int myID, char* file_name_voxels, float* density_max, struct vo
 //!       @param[out] mfp_table_a_ptr   First element for the linear interpolation.
 //!       @param[out] mfp_table_b_ptr   Second element for the linear interpolation.
 ////////////////////////////////////////////////////////////////////////////////
-void load_material(int myID, char file_name_materials[MAX_MATERIALS][250], float* density_max, float* density_nominal, struct linear_interp* mfp_table_data, float2** mfp_Woodcock_table_ptr, int* mfp_Woodcock_table_bytes, float3** mfp_table_a_ptr, float3** mfp_table_b_ptr, int* mfp_table_bytes, struct rayleigh_struct *rayleigh_table_ptr, struct compton_struct *compton_table_ptr)
+void load_material(int myID, char file_name_materials[MAX_MATERIALS][250], float* density_max, float* density_nominal, const struct detector_struct* detector_data, struct linear_interp* mfp_table_data, float2** mfp_Woodcock_table_ptr, int* mfp_Woodcock_table_bytes, float3** mfp_table_a_ptr, float3** mfp_table_b_ptr, int* mfp_table_bytes, struct rayleigh_struct *rayleigh_table_ptr, struct compton_struct *compton_table_ptr)
 {
   char new_line[250];
   char *new_line_ptr = NULL;
@@ -3466,8 +3491,18 @@ void load_material(int myID, char file_name_materials[MAX_MATERIALS][250], float
   MAIN_THREAD printf("\n    -- Reading the material data files (MAX_MATERIALS=%d):\n", MAX_MATERIALS);
   for (mat=0; mat<MAX_MATERIALS; mat++)
   {
+    const int is_asg_material = (detector_data != NULL && detector_data[0].grid_freq > 0.0f &&
+                                (mat == detector_data[0].grid_strip_material || mat == detector_data[0].grid_interspace_material));
+
     if ((file_name_materials[mat][0]=='\0') || (file_name_materials[mat][0]=='\n'))  //  Empty file name
+    {
+      if (is_asg_material)
+      {
+        printf("\n\n   !!load_material ERROR!! ASG material %d was requested, but no material file was provided for that slot!!\n\n", mat+1);
+        exit(-2);
+      }
        continue;   // Re-start loop for next material
+    }
 
     MAIN_THREAD printf("         Mat %d: File \'%s\'\n", mat+1, file_name_materials[mat]);
 //     printf("    -- Reading material file #%d: \'%s\'\n", mat, file_name_materials[mat]);
@@ -3517,13 +3552,22 @@ void load_material(int myID, char file_name_materials[MAX_MATERIALS][250], float
     }
     else                       //  Material NOT found in the voxels
     {
-      MAIN_THREAD printf("                This material is not used in any voxel.\n");
-      
-      // Do not lose time reading the data for materials not found in the voxels, except for the first one (needed to determine the size of the input data).      
-      if (0 == mat)
-        density_max[mat] = 0.01f*density_nominal[mat];   // Assign a small but positive density; this material will not be used anyway.
+      if (is_asg_material)
+      {
+        density_LUT[mat] = density_nominal[mat];
+        density_max[mat] = 0.0f;
+        MAIN_THREAD printf("                Nominal density = %f g/cm^3; used only for ASG attenuation, not Woodcock transport.\n", density_nominal[mat]);
+      }
       else
-        continue;     //  Move on to next material          
+      {
+        MAIN_THREAD printf("                This material is not used in any voxel.\n");
+        
+        // Do not lose time reading the data for materials not found in the voxels, except for the first one (needed to determine the size of the input data).      
+        if (0 == mat)
+          density_max[mat] = 0.01f*density_nominal[mat];   // Assign a small but positive density; this material will not be used anyway.
+        else
+          continue;     //  Move on to next material          
+      }
     }
       
 
@@ -3585,9 +3629,12 @@ void load_material(int myID, char file_name_materials[MAX_MATERIALS][250], float
       sscanf(new_line,"  %le  %le  %le  %le  %le  %le", &d_energy, &d_rayleigh, &d_compton, &d_photelectric, &d_total_mfp, &d_pmax);
 
       // Find and store the minimum total MFP at the current energy, for every material's maximum density:
-      float temp_mfp = d_total_mfp*(density_nominal[mat])/(density_max[mat]);
-      if (temp_mfp < (*mfp_Woodcock_table_ptr)[i].x)
-        (*mfp_Woodcock_table_ptr)[i].x = temp_mfp;       // Store minimum total mfp [cm]
+      if (density_max[mat] > 0.0f)
+      {
+        float temp_mfp = d_total_mfp*(density_nominal[mat])/(density_max[mat]);
+        if (temp_mfp < (*mfp_Woodcock_table_ptr)[i].x)
+          (*mfp_Woodcock_table_ptr)[i].x = temp_mfp;       // Store minimum total mfp [cm]
+      }
 
       // Store the inverse MFP data points with [num_values rows]*[MAX_MATERIALS columns]
       // Scaling the table to the nominal density so that I can re-scale in the kernel to the actual local density:

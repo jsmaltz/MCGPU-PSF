@@ -9,20 +9,20 @@ dataset.gpu.threads_per_block   # GPU THREADS PER CUDA BLOCK (multiple of 32), w
 dataset.gpu.histories_per_gpu   # SIMULATED HISTORIES PER GPU THREAD, was 5000
  
 #[SECTION SOURCE v.2016-12-02]
-spectrum/w_rh_28.txt            # X-RAY ENERGY SPECTRUM FILE
+dataset.src.spectrum_mcgpu      # X-RAY ENERGY SPECTRUM FILE was spectrum/w_rh_28.txt 
 dataset.src.xyz_cm              # SOURCE POSITION: X (chest-to-nipple), Y (right-to-left), Z (caudal-to-cranial) [cm] was 0.0 0.0 -50.0
 dataset.src.uvw                 # SOURCE DIRECTION COSINES: U V W, was 0.0    0.0    1.0 
--1 -1                           # TOTAL AZIMUTHAL (WIDTH, X) AND POLAR (HEIGHT, Z) APERTURES OF THE FAN BEAM [degrees] (input negative to automatically cover the whole detector)
+dataset.src.aperture_deg        # TOTAL AZIMUTHAL (WIDTH, X) AND POLAR (HEIGHT, Z) APERTURES OF THE FAN BEAM [degrees] (input negative to automatically cover the whole detector)
 dataset.src.euler_deg           # EULER ANGLES (RzRyRz) TO ROTATE RECTANGULAR BEAM FROM DEFAULT POSITION AT Y=0, NORMAL=(0,-1,0) was 90.0 90.0 270.0
 dataset.src.fs_fwhm_cm          # SOURCE GAUSSIAN FOCAL SPOT FWHM [cm] was 0.0000
 dataset.src.ang_blur_deg        # 0.18 for DBT, 0 for FFDM [Mackenzie2017]  # ANGULAR BLUR DUE TO MOVEMENT ([exposure_time]*[angular_speed]) [degrees] was 0.0
-NO				# COLLIMATE BEAM TOWARDS POSITIVE AZIMUTHAL (X) ANGLES ONLY? (ie, cone-beam center aligned with chest wall in mammography) [YES/NO]
+dataset.src.only_positive_azimuth # COLLIMATE BEAM TOWARDS POSITIVE AZIMUTHAL (X) ANGLES ONLY? (ie, cone-beam center aligned with chest wall in mammography) [YES/NO]
  
 #[SECTION IMAGE DETECTOR v.2017-06-20]
 dataset.im.path                 # OUTPUT IMAGE FILE NAME was images/mcgpu_image
-det.nu  det.nv                # NUMBER OF PIXELS IN THE IMAGE: Nx Nz was 512 512
-det.pixWid_u_cm det.pixWid_v_cm  # IMAGE SIZE (width, height): Dx Dz [cm] was 60.0 60.0
-spec.SSD_cm                     # SOURCE-TO-DETECTOR DISTANCE (detector set in front of the source, perpendicular to the initial direction) was 105.0
+det.nu  det.nv                  # NUMBER OF PIXELS IN THE IMAGE: Nx Nz was 512 512
+det.im.u_cm det.im.v_cm         # IMAGE SIZE (width, height): Dx Dz [cm] was 60.0 60.0
+spec.SD_cm                      # SOURCE-TO-DETECTOR DISTANCE (detector set in front of the source, perpendicular to the initial direction) was 105.0
 spec.im_offset_uv_cm            # IMAGE OFFSET ON DETECTOR PLANE IN WIDTH AND HEIGHT DIRECTIONS (BY DEFAULT BEAM CENTERED AT IMAGE CENTER) [cm] was 0.0 0.0
 det.thickness_cm                # DETECTOR THICKNESS [cm] was 0.0250
 det.MFP_cm                      # 0.004027  # ==> MFP(Se,19.0keV)  # DETECTOR MATERIAL MEAN FREE PATH AT AVERAGE ENERGY [cm] was  0.004027
@@ -45,7 +45,7 @@ dataset.keep_det_fixed          # KEEP DETECTOR FIXED AT 0 DEGREES FOR DBT? [YES
 #[SECTION DOSE DEPOSITION v.2012-12-12]
 dataset.tally_material_dose     # TALLY MATERIAL DOSE? [YES/NO] (electrons not transported, x-ray energy locally deposited at interaction) was YES 
 dataset.tally_3d_dose           # TALLY 3D VOXEL DOSE? [YES/NO] (dose measured separately for each voxel) was YES 
-dataset.image_path             # OUTPUT VOXEL DOSE FILE NAME was images/mc-gpu_dose.dat         
+dataset.dose_path               # OUTPUT VOXEL DOSE FILE NAME was images/mc-gpu_dose.dat         
 dataset.voxel_dose_roi.x        # VOXEL DOSE ROI: X-index min max (first voxel has index 1) was:   1  6 
 dataset.voxel_dose_roi.y         # VOXEL DOSE ROI: Y-index min max was   1  6 
 dataset.voxel_dose_roi.z       # VOXEL DOSE ROI: Z-index min max   1  4 

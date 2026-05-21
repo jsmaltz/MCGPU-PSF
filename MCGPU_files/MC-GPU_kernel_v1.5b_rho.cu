@@ -513,7 +513,7 @@ __global__ void track_particles(int histories_per_thread,
       if (psf_state_shared && psf_mode_shared == PSF_MODE_DETECTOR_PLANE && !psf_recorded)
         tally_psf_detector_plane(energy, &position, &direction, scatter_state, psf_data, &detector_data_SHARED);
 
-      tally_image(&energy, &position, &direction, &scatter_state, image, &source_data_SHARED, &detector_data_SHARED, &seed);    //!!detectorModel!!
+      tally_image(&energy, &position, &direction, &scatter_state, image, &source_data_SHARED, &detector_data_SHARED, &seed, mfp_table_a, mfp_table_b);    //!!detectorModel!!
 
     }
   }   // [Continue with a new history]
@@ -1838,7 +1838,7 @@ inline bool tally_psf_detector_plane_crossing(float energy, const float3* positi
 #ifdef USING_CUDA
 __device__
 #endif
-inline void tally_image(float* energy, float3* position, float3* direction, signed char* scatter_state, unsigned long long int* image, struct source_struct* source_data_SHARED, struct detector_struct* detector_data_SHARED, int2* seed)     //!!detectorModel!!
+inline void tally_image(float* energy, float3* position, float3* direction, signed char* scatter_state, unsigned long long int* image, struct source_struct* source_data_SHARED, struct detector_struct* detector_data_SHARED, int2* seed, float3* mfp_table_a, float3* mfp_table_b)     //!!detectorModel!!
 {
   // Rotate direction to the coordinate system with the detector on XZ plane (Y=0):       // !!DBTv1.4!!
   apply_rotation(direction, detector_data_SHARED->rot_inv);    //!!DBTv1.4!!
@@ -1863,8 +1863,20 @@ inline void tally_image(float* energy, float3* position, float3* direction, sign
       return;                                                        // Do not tally particle lost in the cover  !!DBTv1.5!!
 
 
-  // Distance from the particle position to the detector at plane XZ (Y=0):
-  float dist_detector = -position->y/direction->y;  
+  // Distance from the particle position to the detector entrance plane XZ (Y=0):
+  float dist_detector = -position->y/direction->y;
+
+  float3 position_detector_plane;
+  position_detector_plane.x = position->x + dist_detector*direction->x;
+  position_detector_plane.y = position->y + dist_detector*direction->y;
+  position_detector_plane.z = position->z + dist_detector*direction->z;
+
+  // --Sample if the particle is absorbed in the antiscatter grid before entering the scintillator:
+  if (detector_data_SHARED->grid_freq>0.0f)
+  {
+    if (ranecu(seed) > antiscatter_grid_transmission_prob(*energy, &position_detector_plane, direction, detector_data_SHARED, mfp_table_a, mfp_table_b))         //!!DBTv1.5!!
+      return;
+  }
 
   // Sample and add the extra distance the particle needs to travel to reach the first interaction inside the scintillator (particle not detected if interaction behind thickness):     !!detectorModel!!
   dist_detector += -detector_data_SHARED->scintillator_MFP*logf(ranecu(seed));   // Add distance to next interaction inside the detector material to the detector distance    //!!detectorModel!!
@@ -1886,13 +1898,6 @@ inline void tally_image(float* energy, float3* position, float3* direction, sign
     if ((pixel_coord_z>-1)&&(pixel_coord_z<detector_data_SHARED->num_pixels.y))
     {
       
-      // --Sample if the particle is absorbed in the antiscatter grid (scatter or fluorescence in the grid not simulated):
-      if (detector_data_SHARED->grid_freq>0.0f)
-      {
-        if (ranecu(seed) > antiscatter_grid_transmission_prob(position, direction, detector_data_SHARED))         //!!DBTv1.5!!
-          return;
-      }
-   
       // --Sample if all the energy is deposited in the pixel or if a fluorescence x-ray was generated and was able to escape detection:
       //           (k-edge energies available at: http://www.esrf.eu/UsersAndScience/Experiments/StructMaterials/ID11/ID11UserGuide/ID11Edges)
       int flag_fluorescence = 0;
@@ -2142,67 +2147,170 @@ inline void apply_rotation(float3 *v, float *m)
 
 
 ////////////////////////////////////////////////////////////////////////////////
-//!  Analytical model of a 1D focused antiscatter grid based on the work of Day and Dance [Phys Med Biol 28, p. 1429-1433 (1983)].
-//!  The model returns the probability of transmission through the grid for the current x-ray direction.
-//!  The position of the particle in the default reference frame with the detector centered at the origin and laying on the XZ plane is used to compute the focused grid angle.
+//!  Analytical model of a 1D focused antiscatter grid.
+//!  The model computes the path length through the attenuating strips in a focused,
+//!  periodic lamella grid and returns the corresponding transmission probability.
+//!  The position of the particle must be on the detector entrance plane in the default
+//!  detector reference frame, centered at the origin and laying on the XZ plane.
 //!
 //!  ASSUMPTIONS: 
-//!     - Currently the x-ray energy is not used: the attenuation at the average energy is assumed for every x-ray.          !!DeBuG!!
+//!     - If ASG material indices are not provided, attenuation falls back to the average-energy MFPs from the input file.
 //!     - Assuming that the focal length of the grid is always identical to the input source-to-detector distance (sdd).     !!DeBuG!!
-//!     - The Day and Dance equations are for an uniform oblique grid and the change in angle for consecutive strips is not modeled. As they explain, this is unlikely to be relevant because
-//!       the prob of x-rays traversing many strips is extremely low, and consecutive strips have very similar angulation.
+//!     - The grid is 1D. The phase is chosen so the detector center lies in an interspace, avoiding a grid line on the central ray.
 //!
-//!     - Using double precision for variables that have to be inverted to avoid inaccuracy for collimated rays (u2 close to 0). Using exclusively double takes 4 times more than exclusively floats!
 ////////////////////////////////////////////////////////////////////////////////
 #ifdef USING_CUDA
 __device__
 #endif
-inline float antiscatter_grid_transmission_prob(float3* position, float3* direction, struct detector_struct* detector_data_SHARED)                   //!!DBTv1.5!!
+inline float antiscatter_grid_strip_path_length(float3* position, float3* direction, struct detector_struct* detector_data_SHARED)                   //!!DBTv1.5!!
 {
-  // -- Compute grid angle at the current location on the detector:
-   
-  // The default MC-GPU detector orientation is on the XZ plane, perpendicular to Y axis, pointing towards Y. I have to transform to Day&Dance 1983 reference on XY plane, perpendicular to Z axis.
-  // The position is already shifted to have the origin at the center of the detector: I can use the position as is to compute the incidence angle -> grid angle for focused grid.
-  double grid_angle, u, w;
-  if (detector_data_SHARED->grid_ratio<0.0f)
-  {
-    // <0 --> input orientation == 0 ==> 1D collimated grid with strips perpendicular to lateral direction X (mammo style), as in Day&Dance1983.
-    grid_angle = (0.5*PI) - atan2(position->x, detector_data_SHARED->sdd);   // A 0 deg angle between the incident beam and the strips corresponds to a grid angle (sigma) of 90 deg = PI/2
-    u = direction->x;
-    w = direction->y;
-  }
-  else
-  {   
-    // >0 --> input orientation == 1 ==> 1D collimated grid with strips parallel to lateral direction X and perpendicular to Z direction (DBT style): switch Z and X axis
-    grid_angle = (0.5*PI) - atan2(position->z, detector_data_SHARED->sdd);
-    u = direction->z;
-    w = direction->y;
-  }
-
   float C = 1.0f/detector_data_SHARED->grid_freq;
-  float d2 = detector_data_SHARED->grid_strip_thickness/sinf(grid_angle);   // Strip thickness in grid reference system   (eq. page 1429, Day&Dance1983)
-  float D2 = C - d2;                                   // Distance between consecutive grid strips 
-  float h  = fabsf(detector_data_SHARED->grid_ratio) * D2;    // Compute the eight of the grid strips, according to the input grid ratio. Using absolute value bc sign encodes grid orientation in my implementation.
-  
-  double u2 = fabs(u - w/tan(grid_angle));                // (eq. 1, Day&Dance1983) Note: u2 is the direction RATIO in the oblique referrence system, not the direction COSINE.  
-  if (u2<1.0e-9)
-    u2 = 1.0e-8;   // !!DeBuG!! Perfectly collimated particles going parallel to strips will have u2=alpha=0. This might gives NaN computing A, but only for few angles (21 deg)??? Add arbitrary epsilon to prevent 0/0.
-  
-  double P = (h/w)*u2;                                        // (eq. 4, Day&Dance1983)  
-  double n = floor(P*detector_data_SHARED->grid_freq);     // grid_freq = 1/C
-  float  q = P - n*C;
-  double alpha = u2/(detector_data_SHARED->grid_strip_mu-detector_data_SHARED->grid_interspace_mu);   // (eq. 8, Day&Dance1983)
-  double inv_alpha = 1.0/alpha;
-  
+  float d = detector_data_SHARED->grid_strip_thickness;
+  float D = C - d;
+  if (C <= 0.0f || d <= 0.0f || D <= 0.0f || direction->y <= 0.0175f)
+    return 1.0e16f;
 
-  // Grid transmission: probability of a photon passing through the grid without interaction:
-  float A = expf(-detector_data_SHARED->grid_interspace_mu*h/w - d2*n*inv_alpha);    // (eq. 9, Day&Dance1983)  
-  float H = 0.0f;   // Step function
-  if (q>=D2)
-    H = 1.0f;
-  float B = (fabsf(q-D2)+2.0f*(float)alpha) * expf((H*(D2-q))*inv_alpha)  +  (fabsf(d2-q)-2.0f*(float)alpha) * expf((-0.5f*(d2+q-fabsf(d2-q)))*inv_alpha);    // (eq. 12, Day&Dance1983)
- 
-  return (A*B*detector_data_SHARED->grid_freq);     // (eq. 10, Day&Dance1983)     ; grid_freq = 1/C
+  const float h = fabsf(detector_data_SHARED->grid_ratio) * D;
+  if (h <= 0.0f || h >= detector_data_SHARED->sdd)
+    return 1.0e16f;
+
+  const bool use_x = (detector_data_SHARED->grid_ratio < 0.0f);
+  const float coord_bottom = use_x ? position->x : position->z;
+  const float dir_coord = use_x ? direction->x : direction->z;
+  const float dy_inv = 1.0f / direction->y;
+  const float slope = dir_coord * dy_inv;
+  const float sdd = detector_data_SHARED->sdd;
+
+  // Focused coordinate mapped to the grid bottom plane.  A primary ray from
+  // the focal point has constant focused coordinate through the grid slab.
+  const float y_start = -h;
+  const float y_end = 0.0f;
+  const float coord_start = coord_bottom + y_start * slope;
+  const float s_start = coord_start * sdd / (sdd + y_start);
+  const float s_end = coord_bottom;
+  const float total_path = h * dy_inv;
+
+  const float ds = s_end - s_start;
+  if (fabsf(ds) < 1.0e-7f * C)
+  {
+    float phase = s_start + 0.5f * C;
+    phase = phase - floorf(phase / C) * C;
+    return (phase < d) ? total_path : 0.0f;
+  }
+
+  const float dir_s = (ds > 0.0f) ? 1.0f : -1.0f;
+  float current_y = y_start;
+  float current_s = s_start;
+  float strip_path = 0.0f;
+
+  // Extremely oblique scatter can cross many strips.  Fall back to the mean
+  // strip fraction rather than spending unbounded time on a photon that will
+  // usually have a tiny transmission probability.
+  const int max_grid_crossings = 2048;
+  int crossing_count = 0;
+
+  while (current_y < y_end - 1.0e-7f && crossing_count < max_grid_crossings)
+  {
+    float phase = current_s + 0.5f * C;
+    phase = phase - floorf(phase / C) * C;
+    if (phase < 0.0f)
+      phase += C;
+
+    const bool in_strip = (phase < d);
+    float delta_s;
+    if (dir_s > 0.0f)
+      delta_s = (phase < d) ? (d - phase) : (C - phase);
+    else
+      delta_s = (phase > d) ? (phase - d) : phase;
+
+    if (delta_s < 1.0e-7f * C)
+      delta_s = C;
+
+    float next_s = current_s + dir_s * delta_s;
+    bool reaches_end = (dir_s > 0.0f) ? (next_s >= s_end) : (next_s <= s_end);
+    float next_y = y_end;
+    if (!reaches_end)
+    {
+      const float denom = next_s - sdd * slope;
+      if (fabsf(denom) < 1.0e-12f)
+      {
+        // Degenerate focused-coordinate inversion: use mean strip fraction
+        // for the remaining path.
+        strip_path += (y_end - current_y) * dy_inv * (d / C);
+        return strip_path;
+      }
+      next_y = sdd * (coord_bottom - next_s) / denom;
+      if (next_y <= current_y)
+        next_y = current_y + 1.0e-7f * h;
+      if (next_y > y_end)
+        next_y = y_end;
+    }
+
+    if (in_strip)
+      strip_path += (next_y - current_y) * dy_inv;
+
+    current_y = next_y;
+    current_s = reaches_end ? s_end : next_s;
+    crossing_count++;
+  }
+
+  if (crossing_count >= max_grid_crossings && current_y < y_end)
+    strip_path += (y_end - current_y) * dy_inv * (d / C);
+
+  if (strip_path < 0.0f)
+    strip_path = 0.0f;
+  if (strip_path > total_path)
+    strip_path = total_path;
+
+  return strip_path;
+}
+
+#ifdef USING_CUDA
+__device__
+#endif
+inline float antiscatter_grid_transmission_prob(float energy, float3* position, float3* direction, struct detector_struct* detector_data_SHARED, float3* mfp_table_a, float3* mfp_table_b)                   //!!DBTv1.5!!
+{
+  const float C = 1.0f / detector_data_SHARED->grid_freq;
+  const float d = detector_data_SHARED->grid_strip_thickness;
+  const float D = C - d;
+  const float h = fabsf(detector_data_SHARED->grid_ratio) * D;
+  const float total_path = h / direction->y;
+  const float strip_path = antiscatter_grid_strip_path_length(position, direction, detector_data_SHARED);
+  const float interspace_path = fmaxf(0.0f, total_path - strip_path);
+
+  float strip_mu = detector_data_SHARED->grid_strip_mu;
+  float interspace_mu = detector_data_SHARED->grid_interspace_mu;
+  const int strip_mat = detector_data_SHARED->grid_strip_material;
+  const int interspace_mat = detector_data_SHARED->grid_interspace_material;
+  if (mfp_table_a && mfp_table_b && strip_mat >= 0 && strip_mat < MAX_MATERIALS)
+  {
+#ifdef USING_CUDA
+    int mat_index = __float2int_rd((energy-mfp_table_data_CONST.e0)*mfp_table_data_CONST.ide);
+#else
+    int mat_index = (int)((energy-mfp_table_data_CONST.e0)*mfp_table_data_CONST.ide + 0.00001f);
+#endif
+    if (mat_index < 0)
+      mat_index = 0;
+    if (mat_index > mfp_table_data_CONST.num_values - 1)
+      mat_index = mfp_table_data_CONST.num_values - 1;
+    float3 a_strip = mfp_table_a[mat_index*MAX_MATERIALS + strip_mat];
+    float3 b_strip = mfp_table_b[mat_index*MAX_MATERIALS + strip_mat];
+    strip_mu = density_LUT_CONST[strip_mat] * (a_strip.x + energy * b_strip.x);
+
+    if (interspace_mat >= 0 && interspace_mat < MAX_MATERIALS)
+    {
+      float3 a_interspace = mfp_table_a[mat_index*MAX_MATERIALS + interspace_mat];
+      float3 b_interspace = mfp_table_b[mat_index*MAX_MATERIALS + interspace_mat];
+      interspace_mu = density_LUT_CONST[interspace_mat] * (a_interspace.x + energy * b_interspace.x);
+    }
+  }
+
+  float transmission = expf(-strip_mu * strip_path - interspace_mu * interspace_path);
+  if (transmission < 0.0f)
+    transmission = 0.0f;
+  if (transmission > 1.0f)
+    transmission = 1.0f;
+  return transmission;
 }
 
 

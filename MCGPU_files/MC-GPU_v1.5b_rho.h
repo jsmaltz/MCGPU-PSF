@@ -235,7 +235,9 @@ detector_struct         // Define a 2D detector plane, located in front of the d
         electronic_noise;                             // !!DeBuG!! this value is not used in the kernel, but still copied to GPU memory  
         
   int2 num_pixels;
-  int total_num_pixels;       
+  int total_num_pixels,
+      grid_strip_material,            // Optional 0-based material index for energy-dependent ASG strip attenuation. <0 uses grid_strip_mu.
+      grid_interspace_material;       // Optional 0-based material index for energy-dependent ASG interspace attenuation. <0 uses grid_interspace_mu.
 };
 
 
@@ -334,7 +336,7 @@ psf_struct
 
 void read_input(int argc, char** argv, int myID, unsigned long long int* total_histories, int* gpu_id, int* seed_input, int* num_threads_per_block, int* histories_per_thread, struct detector_struct* detector_data, unsigned long long int** image_ptr, int* image_bytes, struct source_struct* source_data, struct source_energy_struct* source_energy_data, struct voxel_struct* voxel_data, char* file_name_voxels, char file_name_materials[MAX_MATERIALS][250], char* file_name_output, char* file_name_espc, int* num_projections, ulonglong2** voxels_Edep_ptr, int* voxels_Edep_bytes, char* file_dose_output, short int* dose_ROI_x_min, short int* dose_ROI_x_max, short int* dose_ROI_y_min, short int* dose_ROI_y_max, short int* dose_ROI_z_min, short int* dose_ROI_z_max, double* SRotAxisD, double* translation_helical, int* flag_material_dose, bool* flag_simulateMammoAfterDBT, bool* flag_detectorFixed, struct psf_struct* psf_data, EdgeVectors& E_out, float** h_rho_out);
 void load_voxels(int myID, char* file_name_voxels, float* density_max, struct voxel_struct* voxel_data, int** voxel_mat_dens_ptr, long long int* voxel_mat_dens_bytes, short int* dose_ROI_x_max, short int* dose_ROI_y_max, short int* dose_ROI_z_max);
-void load_material(int myID, char file_name_materials[MAX_MATERIALS][250], float* density_max, float* density_nominal, struct linear_interp* mfp_table_data, float2** mfp_Woodcock_table, int* mfp_Woodcock_table_bytes, float3** mfp_table_a_ptr, float3** mfp_table_b_ptr, int* mfp_table_bytes, struct rayleigh_struct *rayleigh_table_ptr, struct compton_struct *compton_table_ptr);
+void load_material(int myID, char file_name_materials[MAX_MATERIALS][250], float* density_max, float* density_nominal, const struct detector_struct* detector_data, struct linear_interp* mfp_table_data, float2** mfp_Woodcock_table, int* mfp_Woodcock_table_bytes, float3** mfp_table_a_ptr, float3** mfp_table_b_ptr, int* mfp_table_bytes, struct rayleigh_struct *rayleigh_table_ptr, struct compton_struct *compton_table_ptr);
 void trim_name(char* input_line, char* file_name);
 char* fgets_trimmed(char* trimmed_line, int num, FILE* file_ptr);
 int report_image(char* file_name_output, struct detector_struct* detector_data, struct source_struct* source_data, float mean_energy_spectrum, unsigned long long int* image, double time_elapsed, unsigned long long int total_histories, int current_projection, int num_projections, int myID, int numprocs, double current_angle, int* seed_input);
@@ -423,7 +425,7 @@ void track_particles(int history_batch, int histories_per_thread, short int num_
 #ifdef USING_CUDA
 __device__
 #endif
-inline void tally_image(float* energy, float3* position, float3* direction, signed char* scatter_state, unsigned long long int* image, struct source_struct* source_data_SHARED, struct detector_struct* detector_data_SHARED, int2* seed);       //!!detectorModel!!
+inline void tally_image(float* energy, float3* position, float3* direction, signed char* scatter_state, unsigned long long int* image, struct source_struct* source_data_SHARED, struct detector_struct* detector_data_SHARED, int2* seed, float3* mfp_table_a, float3* mfp_table_b);       //!!detectorModel!!
 
 #ifdef USING_CUDA
 __device__
@@ -543,7 +545,11 @@ inline void multiply_3x3(float *m_out, float *m, float *n);                     
 #ifdef USING_CUDA
 __device__
 #endif
-float antiscatter_grid_transmission_prob(float3* position, float3* direction, struct detector_struct* detector_data);        // !!DBTv1.5!!
+float antiscatter_grid_transmission_prob(float energy, float3* position, float3* direction, struct detector_struct* detector_data, float3* mfp_table_a, float3* mfp_table_b);        // !!DBTv1.5!!
+#ifdef USING_CUDA
+__device__
+#endif
+float antiscatter_grid_strip_path_length(float3* position, float3* direction, struct detector_struct* detector_data);        // !!DBTv1.5!! 1D focused grid
 
 #ifdef USING_CUDA
 __device__
